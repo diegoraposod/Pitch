@@ -1,0 +1,2164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<title>PITCH</title>
+<script>
+  // Tone.js from cdnjs; if that is blocked, from jsDelivr, then unpkg. The app itself never waits for it.
+  window.loadTone = function (i) {
+    var SRC = ['https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js',
+               'https://cdn.jsdelivr.net/npm/tone@14.8.49/build/Tone.js',
+               'https://unpkg.com/tone@14.8.49/build/Tone.js'];
+    i = i || 0;
+    if (window.Tone || i >= SRC.length || window.__toneLoading === i) return;
+    window.__toneLoading = i;
+    var s = document.createElement('script'); s.src = SRC[i];
+    s.onerror = function () { window.loadTone(i + 1); };
+    document.head.appendChild(s);
+  };
+  window.loadTone(0);
+</script>
+<style>
+  :root { --bg:#141516; --ink:#f4f1ea; --mute:#6c6a66; --sun:#e29d62; --rec:#c46a5f; }
+  body { animation: enter 5s ease both; }
+  @keyframes enter { from { opacity:0; } to { opacity:1; } }
+  .ui { transition: opacity 1.2s ease; }
+  * { box-sizing:border-box; }
+  html, body {
+    width:100vw; height:100vh; margin:0; padding:0;
+    overflow:hidden !important;       /* no scroll in any direction */
+    position:fixed; inset:0;          /* the app stays pinned to the screen (also stops iOS rubber-band bounce) */
+    overscroll-behavior:none;
+  }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--ink); overflow:hidden;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif;
+    -webkit-user-select:none; user-select:none; }
+  #sky { position:fixed; inset:0; width:100vw; height:100vh; display:block; cursor:grab; touch-action:none; }
+  #sky.grabbing { cursor:grabbing; }
+  #sky.pointing { cursor:pointer; }
+
+  .ui { position:fixed; z-index:5; font-weight:300; }
+  #brand { top:22px; left:26px; font-size:11px; letter-spacing:.6em; }
+  #keyLine { display:block; margin-top:8px; font-size:9px; letter-spacing:.32em; color:var(--mute); text-transform:lowercase; min-height:12px; transition:color 1.5s; }
+  #keyLine.on { color:var(--ink); opacity:.75; }
+
+  #saveWrap { top:18px; right:22px; display:flex; align-items:center; gap:12px; }
+  #recTime { font-size:10px; letter-spacing:.2em; color:var(--rec); font-variant-numeric:tabular-nums; opacity:0; transition:opacity .3s; }
+  #recTime.on { opacity:1; }
+  #recBtn { width:34px; height:34px; border-radius:50%; border:1px solid rgba(244,241,234,.22); background:transparent; padding:0;
+    display:flex; align-items:center; justify-content:center; cursor:pointer; transition:border-color .3s; -webkit-tap-highlight-color:transparent; }
+  #recBtn:hover { border-color:rgba(244,241,234,.6); }
+  #recBtn span { width:11px; height:11px; border-radius:50%; background:var(--rec); transition:border-radius .3s, transform .3s; }
+  #recBtn.recording { border-color:var(--rec); }
+  #recBtn.recording span { border-radius:2px; transform:scale(.85); animation:recPulse 1.2s ease-in-out infinite; }
+  @keyframes recPulse { 0%,100% { opacity:1; } 50% { opacity:.35; } }
+  #dl { font-size:10px; letter-spacing:.18em; color:var(--ink); opacity:.55; text-decoration:none; }
+  #dl:hover { opacity:1; }
+  .hidden { display:none !important; }
+
+
+  #hint { bottom:34px; left:50%; transform:translateX(-50%); font-size:10px; letter-spacing:.14em; color:var(--mute);
+    white-space:nowrap; transition:opacity 2s; text-align:center; }
+  #hint.gone { opacity:0; }
+  #status { bottom:16px; left:50%; transform:translateX(-50%); font-size:10px; letter-spacing:.08em; color:#b9a48e; white-space:nowrap; max-width:92vw; overflow:hidden; text-overflow:ellipsis; }
+  @media (max-width:560px) { #hint { white-space:normal; width:90vw; } }
+</style>
+</head>
+<body>
+
+<canvas id="sky"></canvas>
+
+<div id="brand" class="ui">PITCH<span id="keyLine"></span></div>
+
+<div id="saveWrap" class="ui">
+  <a id="dl" class="hidden" href="#">↓ wav</a>
+  <span id="recTime">0:00</span>
+  <button id="recBtn" aria-label="Record" title="Record (R) · up to 30 s, becomes a fossil"><span></span></button>
+</div>
+
+<div id="hint" class="ui">tap your core to enter · drag it toward the amber stones · tap again to capture a fossil · hold to leave · scroll down to return to Earth</div>
+<div id="status" class="ui" aria-live="polite"></div>
+
+
+<script type="text/plain" id="shaper-src">
+class PitchTransientShaper extends AudioWorkletProcessor {
+  static get parameterDescriptors() {
+    return [{ name: 'amount', defaultValue: 0, minValue: 0, maxValue: 1, automationRate: 'k-rate' }];
+  }
+  constructor() {
+    super();
+    const k = ms => Math.exp(-1 / (sampleRate * ms / 1000));
+    this.fastA = k(0.3); this.fastR = k(40); this.refR = k(700); this.gS = k(1.5);
+    this.fast = 0; this.ref = 0; this.g = 1;
+  }
+  process(inputs, outputs, params) {
+    const inp = inputs[0], out = outputs[0];
+    if (!out || !out.length) return true;
+    const nc = out.length, n = out[0].length, ni = inp ? inp.length : 0;
+    const amt = params.amount[0];
+    let fast = this.fast, ref = this.ref, g = this.g;
+    for (let i = 0; i < n; i++) {
+      let a = 0;
+      for (let c = 0; c < ni; c++) { const v = Math.abs(inp[c][i]); if (v > a) a = v; }
+      fast = a > fast ? a + (fast - a) * this.fastA : a + (fast - a) * this.fastR;
+      ref = fast > ref ? fast : ref * this.refR;
+      let target = 1;
+      if (amt > 0.0005) {
+        const dRef = -20 * Math.log10((fast + 1e-5) / (ref + 1e-5));
+        const t = Math.min(1, Math.max(0, (dRef - 3) / 9));
+        target = Math.pow(10, (-16 * amt * t * t * (3 - 2 * t)) / 20);
+      }
+      g = target + (g - target) * this.gS;
+      for (let c = 0; c < nc; c++) out[c][i] = (c < ni ? inp[c][i] : 0) * g;
+    }
+    this.fast = fast; this.ref = ref; this.g = g;
+    return true;
+  }
+}
+registerProcessor('pitch-transient-shaper', PitchTransientShaper);
+</script>
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+
+  // ---------- Device profile ----------
+  // Safari (macOS and iOS) and phones get a lighter build: equal-power instead of HRTF, a shorter reverb on
+  // mobile Safari, fewer grain voices, no phasers or fog pitch-shift, a 32 fps canvas and pre-rendered light sprites.
+  const UA = navigator.userAgent;
+  const IS_SAFARI = /^((?!chrome|android).)*safari/i.test(UA);
+  const MOBILE = /iPhone|iPad|iPod|Android/i.test(UA) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const LITE = IS_SAFARI || MOBILE;
+  const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+  const rand = (a, b) => a + Math.random() * (b - a);
+  const pick = arr => arr[Math.floor(Math.random() * arr.length)];
+  const TAU = Math.PI * 2;
+  const smooth = t => t * t * (3 - 2 * t);
+
+  const statusEl = $('status'), keyLine = $('keyLine'), hint = $('hint');
+  const MASTER_VOL = 62;            // fixed master level: every other level lives in space now
+  const dl = $('dl'), recBtn = $('recBtn'), recTime = $('recTime');
+
+  // =====================================================================
+  //  SETTINGS
+  // =====================================================================
+  const CLOUD = {
+    target: 0.05, maxMakeup: 6, gateLoud: 0.004, gateMin: 0.0012, gateClosed: 0.35,
+    duckMin: 0.12, duckGain: 0.22,
+    voices: LITE ? 6 : 10, grainMin: 0.05, grainMax: 0.10, delayMin: 0.12, delayMax: 1.6, dryCloud: 0.45,
+    resonatorQ: 55, tunedGain: 10,
+    revDecay: 8, shimmerFb: 0.3, shimmerOut: 0.35,
+    airHz: 5200, airMix: 0.4,
+    rawGain: 1.5,
+    outGain: 1.4
+  };
+  const SPACE = {
+    world: 8000,         // the universe is a torus: travel 4000 px in any direction and you come back from the other side
+    rangeK: 0.85,        // maxDistance = longest screen side × this. Higher = every orb is heard from further away
+    range: Math.max(window.innerWidth, window.innerHeight) * 0.85,
+    place: Math.min(window.innerWidth, window.innerHeight) * 0.9,   // how far apart the orbs are born (kept short, so the journeys stay short)
+    cutoffMin: 200, cutoffSpan: 8000,                                // low-pass: 200 Hz at maxDistance, 8.2 kHz beside the orb          // how far (px) a galaxy can be heard from
+    maxRec: 30,          // seconds: a manual resample (top-right button) stops on its own after this
+    fossilSec: 6,        // seconds: tapping your core bounces this much into a new 'fossil' orb
+    moveAccel: 1400      // keyboard travel acceleration (px/s²)
+  };
+
+  const DRY_END = 60;
+  const ramp01 = x => 0.5 - 0.5 * Math.cos(clamp(x, 0, 1) * Math.PI);
+  const dryOf = u => { const c = Math.cos(clamp(u / DRY_END, 0, 1) * Math.PI / 2); return c < 1e-9 ? 0 : c; };
+  const fxOf = u => Math.sin(clamp(u / DRY_END, 0, 1) * Math.PI / 2);
+  const glitchOf = u => ramp01((u - 10) / 10) * ramp01((50 - u) / 10);
+  const blendGains = u => ({ raw: dryOf(u) * (1 - 0.85 * ramp01((u - 10) / 30)), proc: fxOf(u) });
+  const shaperAmount = u => 1 - fxOf(u);
+  const spaceOf = u => u <= DRY_END ? 0 : Math.sin(clamp((u - DRY_END) / (100 - DRY_END), 0, 1) * Math.PI / 2);
+  let blendVal = 10;                 // follows your distance to the stones: Earth alone in the dark, Cloud near them
+  let blendAuto = 10, blendOffset = 0;
+  const effBlend = () => blendVal;
+
+  function poolsFor(sc) {
+    const fifth = Math.pow(2, sc.degrees[4] / 12);
+    return { dark: [0.5, 1, 1, fifth, 2], mid: [0.25, 0.5, 0.5, 1, 1, fifth], bright: [0.25, 0.25, 0.5, 0.5, 1] };
+  }
+
+  // =====================================================================
+  //  STATIC SCALE
+  // =====================================================================
+  const SCALE_CFG = { analysisSec: 4, maxSec: 8, minPeaks: 40, dominance: 1.5 };
+  const MODES = {
+    major: [0, 2, 4, 5, 7, 9, 11], lydian: [0, 2, 4, 6, 7, 9, 11], mixolydian: [0, 2, 4, 5, 7, 9, 10],
+    minor: [0, 2, 3, 5, 7, 8, 10], dorian: [0, 2, 3, 5, 7, 9, 10], phrygian: [0, 1, 3, 5, 7, 8, 10],
+    harmonic: [0, 2, 3, 5, 7, 8, 11]
+  };
+  const NOTE_NAMES = ['C', 'C♯', 'D', 'E♭', 'E', 'F', 'F♯', 'G', 'A♭', 'A', 'B♭', 'B'];
+  function buildScale(pc, modeName) {
+    const d = MODES[modeName];
+    let m = pc; while (m < 31) m += 12; while (m > 42) m -= 12;
+    const colour = modeName === 'lydian' ? d[3] : (modeName === 'phrygian' || modeName === 'harmonic') ? d[5] : d[4];
+    const offs = [0, d[4], 12 + d[2], 12 + d[6], 24 + d[1], 24 + colour];
+    const freqs = offs.map(o => 440 * Math.pow(2, (m + o - 69) / 12));
+    const root = freqs[0];
+    let cents = 1200 * Math.log2(root / 73.4162);
+    while (cents > 600) cents -= 1200; while (cents < -600) cents += 1200;
+    return { pc, mode: modeName, name: NOTE_NAMES[pc] + ' ' + modeName, root, freqs, cents, degrees: d,
+             notes: d.map(x => root * Math.pow(2, x / 12)) };
+  }
+  const DEFAULT_SCALE = buildScale(2, 'minor');
+
+  // ---------- Environmental field ----------
+  const FIELD = { h: 2166136261, n: 0, magN: 0, humProm: 0, humN: 0 };
+  const fieldReset = () => { FIELD.h = 2166136261; FIELD.n = 0; FIELD.magN = 0; FIELD.humProm = 0; FIELD.humN = 0; };
+  const fieldPush = v => { FIELD.h = Math.imul(FIELD.h ^ (Math.round(v) | 0), 16777619) >>> 0; FIELD.n++; };
+  const fieldSource = () => FIELD.magN && FIELD.humProm > 0 ? 'magnetometer + mains hum' : FIELD.magN ? 'magnetometer' : FIELD.humProm > 0 ? 'mains hum' : 'none';
+  function fieldRng() {
+    if (FIELD.n === 0) return Math.random;
+    let a = (FIELD.h ^ Math.floor(performance.now() * 997)) >>> 0;
+    return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+  }
+  function humProminence(spec, sr, f0) {
+    const bw = sr / 2 / spec.length; let sum = 0;
+    for (let k = 1; k <= 3; k++) {
+      const b = Math.round(f0 * k / bw); if (b - 12 < 0 || b + 12 >= spec.length) continue;
+      let pk = -Infinity; for (let j = b - 1; j <= b + 1; j++) pk = Math.max(pk, spec[j]);
+      const nb = []; for (let j = b - 12; j <= b + 12; j++) if (Math.abs(j - b) > 2) nb.push(spec[j]);
+      nb.sort((x, y) => x - y);
+      sum += Math.max(0, pk - nb[nb.length >> 1] - 6);
+    }
+    return sum;
+  }
+  function fieldHum(spec, sr) {
+    const p50 = humProminence(spec, sr, 50), p60 = humProminence(spec, sr, 60);
+    FIELD.humProm += p50 + p60; FIELD.humN++;
+    fieldPush(p50 * 8); fieldPush(p60 * 8);
+  }
+
+  function detectScale(chroma, force) {
+    let tot = 0; for (let i = 0; i < 12; i++) tot += chroma[i];
+    if (tot <= 0) return null;
+    const score = [];
+    for (let p = 0; p < 12; p++) score.push(chroma[p] + 0.5 * chroma[(p + 7) % 12] + 0.35 * chroma[(p + 4) % 12]);
+    let pc = 0; for (let p = 1; p < 12; p++) if (score[p] > score[pc]) pc = p;
+    const mean = score.reduce((a, b) => a + b, 0) / 12;
+    if (!force && score[pc] < SCALE_CFG.dominance * mean) return null;
+    const rng = fieldRng();
+    if (FIELD.n > 0) {
+      const v = []; let vs = 0; for (let i = 0; i < 12; i++) { const x = Math.pow(rng(), 3); v.push(x); vs += x; }
+      chroma = chroma.map((c, i) => c + tot * 0.15 * v[i] / vs);
+      tot *= 1.15;
+      for (let p = 0; p < 12; p++) score[p] = chroma[p] + 0.5 * chroma[(p + 7) % 12] + 0.35 * chroma[(p + 4) % 12];
+      pc = 0; for (let p = 1; p < 12; p++) if (score[p] > score[pc]) pc = p;
+    }
+    const fits = Object.keys(MODES).map(m => {
+      let inS = 0; MODES[m].forEach(i => { inS += chroma[(pc + i) % 12]; });
+      return { m, fit: (inS - 0.6 * (tot - inS)) / tot };
+    });
+    const top = Math.max(...fits.map(f => f.fit));
+    const cands = fits.filter(f => f.fit >= top - 0.1);
+    return buildScale(pc, cands[Math.floor(rng() * cands.length)].m);
+  }
+  const fallbackScale = () => {
+    const rng = fieldRng(), names = Object.keys(MODES);
+    return rng() < 0.5 ? DEFAULT_SCALE : buildScale(Math.floor(rng() * 12), names[Math.floor(rng() * names.length)]);
+  };
+  function addSoft(spec, sr, chroma) {
+    const binHz = sr / 2 / spec.length;
+    const kMin = Math.max(2, Math.floor(120 / binHz)), kMax = Math.min(spec.length - 2, Math.floor(1200 / binHz));
+    const vals = []; for (let k = kMin; k <= kMax; k++) vals.push(spec[k]);
+    vals.sort((a, b) => a - b);
+    const med = vals[vals.length >> 1];
+    for (let k = kMin; k <= kMax; k++) {
+      const w = spec[k] - med - 2;
+      if (!(w > 0) || !(spec[k] > -90)) continue;
+      const midi = Math.round(69 + 12 * Math.log2((k * binHz) / 440));
+      chroma[((midi % 12) + 12) % 12] += w;
+    }
+  }
+  function addPeaks(spec, sr, chroma) {
+    const binHz = sr / 2 / spec.length;
+    const kMin = Math.max(9, Math.floor(120 / binHz)), kMax = Math.min(spec.length - 10, Math.floor(1200 / binHz));
+    let count = 0;
+    for (let k = kMin; k <= kMax; k++) {
+      const b = spec[k];
+      if (!(b > -80) || !(b > spec[k - 1]) || !(b >= spec[k + 1])) continue;
+      let base = 0; for (let j = -8; j <= 8; j++) base += spec[k + j]; base /= 17;
+      const prom = b - base;
+      if (prom < 9) continue;
+      const a = spec[k - 1], c = spec[k + 1], den = a - 2 * b + c;
+      const f = (k + (den !== 0 ? 0.5 * (a - c) / den : 0)) * binHz;
+      const midi = 69 + 12 * Math.log2(f / 440);
+      if (Math.abs(midi - Math.round(midi)) > 0.35) continue;
+      chroma[((Math.round(midi) % 12) + 12) % 12] += Math.min(prom, 40);
+      count++;
+    }
+    return count;
+  }
+
+  function makeBanks(build, out) {
+    let cur = null;
+    const live = new Set(), timers = new Set();
+    return {
+      get cur() { return cur; },
+      each(fn) { live.forEach(fn); },
+      set(scale, fadeSec) {
+        const b = build(scale);
+        b.g.connect(out);
+        live.add(b);
+        if (fadeSec > 0) b.g.gain.rampTo(1, fadeSec); else b.g.gain.value = 1;
+        if (cur) {
+          const old = cur;
+          old.g.gain.rampTo(0, fadeSec);
+          const id = setTimeout(() => { timers.delete(id); live.delete(old); disposeAll(old.nodes); }, fadeSec * 1000 + 500);
+          timers.add(id);
+        }
+        cur = b;
+        return b;
+      },
+      dispose() {
+        timers.forEach(clearTimeout); timers.clear();
+        live.forEach(b => disposeAll(b.nodes)); live.clear(); cur = null;
+      }
+    };
+  }
+
+  // ---------- Global audio state ----------
+  let built = false, running = false, busy = false, fading = false;
+  let session = null, stopTimer = null;
+  let fade, master, masterLimiter, masterClip, outTap, modeBus, reverb, reverbIn, fogIn, bgAudio = null;
+
+  // ---------- Status ----------
+  let flashTimer = null;
+  function setStatus(t) { clearTimeout(flashTimer); statusEl.textContent = t; }
+  function flash(t) { clearTimeout(flashTimer); statusEl.textContent = t; flashTimer = setTimeout(() => { statusEl.textContent = statusText(); }, 2600); }
+  let micProblem = '';
+  function statusText() {
+    if (!(running && session && session.input.usingFallback)) return '';
+    if (micProblem === 'insecure') return 'no microphone: open PITCH from its https link (or in Chrome on a computer)';
+    if (micProblem === 'denied')   return 'microphone blocked: allow it in the browser settings, then reload';
+    if (micProblem === 'none')     return 'no microphone found on this device';
+    return 'microphone unavailable · listening to soft noise instead';
+  }
+
+  // ---------- Master volume / blend ----------
+  const sliderToDb = v => v <= 0 ? -Infinity : Math.max(-60, 20 * Math.log10(v / 100));
+  function setBlend(v) {
+    blendVal = clamp(Math.round(v), 0, 100);
+    if (session && session.engines.mic) session.engines.mic.setBlend(blendVal);
+  }
+
+  // ---------- Audio helpers ----------
+  function disposeAll(nodes) {
+    nodes.forEach(n => {
+      try { if (typeof n.stop === 'function' && n.state === 'started') n.stop(); } catch (e) {}
+      try { n.dispose(); } catch (e) {}
+    });
+  }
+  const isTone = n => !!n && typeof n.toDestination === 'function';
+  function link(from, to) {
+    if (isTone(from)) { from.connect(to); return; }
+    if (isTone(to)) {
+      try { if (typeof Tone.connect === 'function') { Tone.connect(from, to); return; } } catch (e) {}
+      from.connect(to.input || to);
+      return;
+    }
+    from.connect(to);
+  }
+
+  // Engine output: out -> distance low-pass -> [moiré phaser] -> position (HRTF or equal-power) -> dry bus,
+  // reverb send and fog send. `out.gain` is set by how close your galaxy is.
+  //   o.phaser: a phaser that only wakes when you float between two orbs
+  //   o.hrtf:   true 3D binaural position (mono in, binaural out). Not for the binaural drone: HRTF sums
+  //             its input to mono, which would erase the left/right beat that makes it binaural.
+  function makeOut(env, nodes, send, dry, o = {}) {
+    const out = new Tone.Gain(0);
+    const lp = new Tone.Filter(18000, 'lowpass');
+    out.connect(lp);
+    let end = lp, phaser = null, pan = null, pan3d = null;
+    if (o.phaser && !LITE) {
+      phaser = new Tone.Phaser({ frequency: 0.11 + Math.random() * 0.06, octaves: 3.2, baseFrequency: 280, Q: 3, stages: 8, wet: 0 });
+      lp.connect(phaser); end = phaser; nodes.push(phaser);
+    }
+    if (o.hrtf) {
+      pan3d = new Tone.Panner3D({ panningModel: IS_SAFARI ? 'equalpower' : 'HRTF', distanceModel: 'linear', rolloffFactor: 0, refDistance: 1, maxDistance: 10000,
+                                  positionX: 0, positionY: 0, positionZ: -1 });
+      end.connect(pan3d); end = pan3d; nodes.push(pan3d);
+    } else {
+      pan = new Tone.Panner(0);
+      end.connect(pan); end = pan; nodes.push(pan);
+    }
+    const dryG = new Tone.Gain(dry), sendG = new Tone.Gain(send);
+    end.connect(dryG); dryG.connect(env.bus);
+    end.connect(sendG); sendG.connect(env.reverbIn);
+    let fogG = null;
+    if (env.fogIn) { fogG = new Tone.Gain(0); end.connect(fogG); fogG.connect(env.fogIn); nodes.push(fogG); }
+    out.send = sendG; out.dry = dryG; out.lp = lp; out.panner = pan; out.pan3d = pan3d; out.phaser = phaser; out.fog = fogG;
+    out.baseSend = send; out.baseDry = dry;
+    nodes.push(out, lp, dryG, sendG);
+    return out;
+  }
+
+  async function ensureBuilt() {
+    if (built) return;
+    fade = new Tone.Gain(0);
+    master = new Tone.Volume(sliderToDb(MASTER_VOL));
+    const rawCtx = Tone.getContext().rawContext;
+    masterLimiter = rawCtx.createDynamicsCompressor();
+    // transparent brickwall: -1 dBFS ceiling, 1 ms attack, 120 ms release (Chrome's compressor also looks ahead ~6 ms)
+    masterLimiter.threshold.value = -1; masterLimiter.knee.value = 0; masterLimiter.ratio.value = 20;
+    masterLimiter.attack.value = 0.001; masterLimiter.release.value = 0.12;
+    masterClip = rawCtx.createWaveShaper();
+    const CN = 4097, curve = new Float32Array(CN);
+    for (let i = 0; i < CN; i++) {
+      const x = (i / (CN - 1)) * 2 - 1, ax = Math.abs(x);
+      curve[i] = ax < 0.9 ? x : Math.sign(x) * (0.9 + 0.1 * Math.tanh((ax - 0.9) / 0.1));
+    }
+    masterClip.curve = curve; masterClip.oversample = '2x';
+    outTap = new Tone.Gain(1);
+    masterLimiter.connect(masterClip);
+    link(masterClip, outTap);
+    if (MOBILE) {
+      // Phones: the mix plays through an <audio> element fed by a media stream. Mobile browsers let a playing
+      // <audio> element continue in the background and with the screen locked; plain Web Audio gets cut.
+      try { if (navigator.audioSession) navigator.audioSession.type = 'play-and-record'; } catch (e) {}   // 'playback' would switch the microphone off on iOS
+      const msd = rawCtx.createMediaStreamDestination();
+      link(outTap, msd);
+      bgAudio = new Audio();
+      bgAudio.srcObject = msd.stream;
+      bgAudio.setAttribute('playsinline', '');
+      bgAudio.play().catch(() => { outTap.toDestination(); bgAudio = null; });   // if refused, fall back to the normal output
+      if ('mediaSession' in navigator) {
+        try { navigator.mediaSession.metadata = new MediaMetadata({ title: 'PITCH · Onsen Estelar', artist: 'PITCH' }); } catch (e) {}
+      }
+    } else {
+      outTap.toDestination();
+    }
+    modeBus = new Tone.Gain(1);
+    reverbIn = new Tone.Gain(1);
+    // Convolution reverb (generated impulse response), long and soft. The send is filtered first so the tail
+    // stays silky: no rumble below 140 Hz, no metallic fizz above 6.5 kHz, and the tail itself darkens as it decays.
+    reverb = new Tone.Reverb({ decay: MOBILE ? 8 : (IS_SAFARI ? 12 : 18), preDelay: 0.08, wet: 1 });
+    await reverb.generate();
+    const revHp = new Tone.Filter(140, 'highpass'), revLp = new Tone.Filter(6500, 'lowpass', -24);
+    const revDamp = new Tone.Filter(4200, 'lowpass', -12);
+    reverbIn.chain(revHp, revLp, reverb);
+    // FOG: distant orbs are also sent here. A cascade of all-pass filters smears their attacks,
+    // an octave-down pitch shift thickens them, and the result only exists inside the reverb: sound heard through steam.
+    if (!MOBILE) {
+    fogIn = new Tone.Gain(1);
+    const ap = [190, 470, 1050, 2300].map(f => new Tone.Filter({ type: 'allpass', frequency: f, Q: 0.6 }));
+    const fogLp = new Tone.Filter(2200, 'lowpass', -12), fogHp = new Tone.Filter(90, 'highpass');
+    const fogOut = new Tone.Gain(0.55);
+    const fogChain = LITE ? [...ap, fogHp, fogLp, fogOut, reverb]
+                          : [...ap, new Tone.PitchShift({ pitch: -12, windowSize: 0.22, wet: 1 }), fogHp, fogLp, fogOut, reverb];
+    fogIn.chain(...fogChain);
+    }
+    modeBus.connect(fade);
+    reverb.connect(revDamp); revDamp.connect(fade);
+    fade.connect(master);
+    // TAPE WARMTH: a little weight in the lows, the digital top gently rounded, then a soft saturation curve
+    // (tanh, 4x oversampled) that thickens the drones and rounds peaks before the limiter ever has to work.
+    const tapeLow = rawCtx.createBiquadFilter(); tapeLow.type = 'lowshelf'; tapeLow.frequency.value = 110; tapeLow.gain.value = 1.5;
+    const tapeHigh = rawCtx.createBiquadFilter(); tapeHigh.type = 'highshelf'; tapeHigh.frequency.value = 9500; tapeHigh.gain.value = -2.5;
+    const tapeDrive = rawCtx.createGain(); tapeDrive.gain.value = 1.2;
+    const tape = rawCtx.createWaveShaper();
+    { const N = 4097, c = new Float32Array(N), k = 1.6, norm = Math.tanh(k);
+      for (let i = 0; i < N; i++) { const x = (i / (N - 1)) * 2 - 1; c[i] = Math.tanh(k * x) / norm; }
+      tape.curve = c; tape.oversample = LITE ? '2x' : '4x'; }
+    const tapeTrim = rawCtx.createGain(); tapeTrim.gain.value = 0.85;
+    link(master, tapeLow);
+    tapeLow.connect(tapeHigh); tapeHigh.connect(tapeDrive); tapeDrive.connect(tape); tape.connect(tapeTrim); tapeTrim.connect(masterLimiter);
+    built = true;
+  }
+
+  // =====================================================================
+  //  INPUT
+  // =====================================================================
+  function buildFallbackNoise(T) {
+    const noise = T(new Tone.Noise('white'));
+    noise.volume.value = -22;
+    const bp = T(new Tone.Filter({ type: 'bandpass', frequency: 1200, Q: 0.4 }));
+    const g = T(new Tone.Gain(0.5));
+    const lf1 = T(new Tone.LFO({ frequency: 0.07, min: 400, max: 2600 }));
+    const lf2 = T(new Tone.LFO({ frequency: 0.19, min: 0.12, max: 0.9 }));
+    lf1.connect(bp.frequency); lf2.connect(g.gain);
+    noise.chain(bp, g);
+    noise.start(); lf1.start(); lf2.start();
+    return g;
+  }
+
+  async function openInput() {
+    const nodes = [];
+    const T = n => (nodes.push(n), n);
+    const src = T(new Tone.Gain(1));
+    let stream = null, msNode = null, usingFallback = false;
+    micProblem = '';
+    try {
+      if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        micProblem = 'insecure'; throw new Error('this page was not opened from a secure (https) link');
+      }
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } });
+      msNode = Tone.getContext().rawContext.createMediaStreamSource(stream);
+      link(msNode, src);
+    } catch (err) {
+      console.warn('Microphone unavailable, using the synthetic white-noise fallback:', err);
+      if (!micProblem) micProblem = err && (err.name === 'NotAllowedError' || err.name === 'SecurityError') ? 'denied'
+                                  : err && err.name === 'NotFoundError' ? 'none' : 'other';
+      if (stream) stream.getTracks().forEach(t => t.stop());
+      stream = null; msNode = null; usingFallback = true;
+      buildFallbackNoise(T).connect(src);
+    }
+    const fft = T(new Tone.Analyser('fft', 1024));
+    const wave = T(new Tone.Analyser('waveform', 1024));
+    const keyHp = T(new Tone.Filter(100, 'highpass'));
+    const keyFft = T(new Tone.Analyser('fft', 8192));
+    const humFft = T(new Tone.Analyser('fft', 8192));
+    fieldReset();
+    let mag = null;
+    try {
+      if (typeof Magnetometer !== 'undefined') {
+        mag = new Magnetometer({ frequency: 10 });
+        mag.addEventListener('reading', () => {
+          if (FIELD.magN > 3000) return;
+          fieldPush(mag.x * 50); fieldPush(mag.y * 50); fieldPush(mag.z * 50); FIELD.magN++;
+        });
+        mag.addEventListener('error', () => {});
+        mag.start();
+      }
+    } catch (e) { mag = null; }
+    src.connect(humFft); src.connect(fft); src.connect(wave);
+    src.connect(keyHp); keyHp.connect(keyFft);
+    return {
+      src, fft, wave, keyFft, humFft, usingFallback,
+      stopKeyAnalysis() { try { src.disconnect(keyHp); src.disconnect(humFft); } catch (e) {} },
+      dispose() {
+        if (mag) { try { mag.stop(); } catch (e) {} mag = null; }
+        if (stream) stream.getTracks().forEach(t => t.stop());
+        if (msNode) { try { msNode.disconnect(); } catch (e) {} }
+        disposeAll(nodes);
+      }
+    };
+  }
+
+  // =====================================================================
+  //  TRANSIENT SHAPER
+  // =====================================================================
+  let shaperModule = null;
+  async function makeShaperNode() {
+    const c = Tone.getContext();
+    if (!shaperModule) {
+      const url = URL.createObjectURL(new Blob([$('shaper-src').textContent], { type: 'text/javascript' }));
+      shaperModule = c.addAudioWorkletModule(url, 'pitch-transient-shaper').then(
+        () => URL.revokeObjectURL(url),
+        e => { URL.revokeObjectURL(url); shaperModule = null; throw e; });
+    }
+    await shaperModule;
+    return c.createAudioWorkletNode('pitch-transient-shaper', { channelCount: 2, channelCountMode: 'explicit', outputChannelCount: [2] });
+  }
+
+  // =====================================================================
+  //  YOUR GALAXY · AMBIENT MIC
+  // =====================================================================
+  async function createMic(env) {
+    const nodes = [];
+    const T = n => (nodes.push(n), n);
+    const out = makeOut({ bus: env.bus, reverbIn: env.reverbIn }, nodes, 0.22, 1.0);
+    const voices = [];
+    const raw = Tone.getContext().rawContext;
+    let timer = null, banks = null, rawComp = null, shaper = null, cloudShaper = null;
+
+    try {
+      const trim  = T(new Tone.Gain(1));
+      const hp    = T(new Tone.Filter(100, 'highpass'));
+      const gate  = T(new Tone.Gain(CLOUD.gateClosed));
+      const guard = T(new Tone.Gain(1));
+      const comp  = T(new Tone.Compressor({ threshold: -24, ratio: 5, attack: 0.003, release: 0.25, knee: 10 }));
+      const lim   = T(new Tone.Limiter(-14));
+      const cloudLp = T(new Tone.Filter(6000, 'lowpass', -12));
+      const b0 = blendGains(effBlend());
+      const procG = T(new Tone.Gain(b0.proc));
+      env.input.src.chain(trim, hp, gate, guard);
+
+      const gIn  = T(new Tone.Gain(1));
+      const gOut = T(new Tone.Gain(0.6));
+      guard.chain(procG, comp, lim, cloudLp, gIn);
+
+      for (let i = 0; i < CLOUD.voices; i++) {
+        const dly = raw.createDelay(2);
+        const env_ = raw.createGain(); env_.gain.value = 0;
+        const pan = raw.createStereoPanner();
+        dly.connect(env_); env_.connect(pan);
+        link(gIn, dly);
+        link(pan, gOut);
+        voices.push({ dly, env: env_, pan, next: 0 });
+      }
+
+      const HANN = new Float32Array(64);
+      for (let i = 0; i < HANN.length; i++) HANN[i] = Math.pow(Math.sin(Math.PI * i / (HANN.length - 1)), 2);
+      let pools = poolsFor(DEFAULT_SCALE);
+      const state = { density: 0.7, pool: pools.mid, useCurve: true, glitch: glitchOf(effBlend()), glitchTo: glitchOf(effBlend()) };
+      const LOOK = 0.45;
+
+      function playGrain(v, t0) {
+        const gl = state.glitch;
+        const g = rand(CLOUD.grainMin * (1 - gl) + 0.003 * gl, CLOUD.grainMax * (1 - gl) + 0.016 * gl);
+        if (gl > 0.05 && Math.random() < 0.55 * gl) return t0 + g + 0.01 + Math.random() * 0.25 * gl;
+        const r = pick(state.pool);
+        const d0 = rand(CLOUD.delayMin, CLOUD.delayMax);
+        const d1 = Math.max(0, d0 + (1 - r) * g);
+        v.dly.delayTime.setValueAtTime(d0, t0);
+        v.dly.delayTime.linearRampToValueAtTime(d1, t0 + g);
+        v.pan.pan.setValueAtTime(rand(-0.85, 0.85), t0);
+        const ep = v.env.gain;
+        if (state.useCurve) { try { ep.setValueCurveAtTime(HANN, t0, g); } catch (e) { state.useCurve = false; } }
+        if (!state.useCurve) {
+          ep.setValueAtTime(0, t0);
+          ep.linearRampToValueAtTime(1, t0 + g / 2);
+          ep.linearRampToValueAtTime(0, t0 + g);
+        }
+        return t0 + g + 0.001 + Math.random() * (0.012 + (1 - state.density) * 0.08) + gl * Math.random() * 0.2;
+      }
+      function schedule() {
+        const now = raw.currentTime;
+        for (const v of voices) {
+          if (v.next < now) v.next = now + rand(0.02, 0.1);
+          let n = 0;
+          while (v.next < now + LOOK && n++ < 12) v.next = playGrain(v, v.next);
+        }
+      }
+      schedule();
+      timer = setInterval(schedule, 90);
+
+      const REGS = LITE ? [1, 2] : [1, 2, 4], REGGAIN = [1, 0.7, 0.45];
+      const fold = f => { while (f < 200) f *= 2; while (f >= 400) f /= 2; return f; };
+      const resIn  = T(new Tone.Gain(1));
+      const resSum = T(new Tone.Gain(CLOUD.tunedGain));
+      const resComp = T(new Tone.Compressor({ threshold: -28, ratio: 4, attack: 0.03, release: 0.4 }));
+      gOut.connect(resIn);
+      banks = makeBanks(scale => {
+        const bn = [], B = n => (bn.push(n), n);
+        const g = B(new Tone.Gain(0));
+        scale.notes.forEach((nf, di) => REGS.forEach((m, k) => {
+          const f = B(new Tone.Filter({ type: 'bandpass', frequency: fold(nf) * m, Q: CLOUD.resonatorQ }));
+          const gg = B(new Tone.Gain(REGGAIN[k] * (di % 2 === 0 ? 1 : 0.6)));
+          resIn.connect(f); f.chain(gg, g);
+        }));
+        return { g, nodes: bn };
+      }, resSum);
+      resSum.connect(resComp);
+
+      const cloudBus = T(new Tone.Gain(1));
+      const dryCloud = T(new Tone.Gain(CLOUD.dryCloud));
+      gOut.connect(dryCloud); dryCloud.connect(cloudBus);
+      resComp.connect(cloudBus);
+
+      const rev = T(new Tone.Reverb({ decay: MOBILE ? 4 : CLOUD.revDecay, preDelay: 0.04, wet: 1 }));
+      await rev.generate();
+      const shP  = T(MOBILE ? new Tone.Gain(0) : new Tone.PitchShift({ pitch: 12, windowSize: 0.12, wet: 1 }));   // phones: shimmer off
+      const shHp = T(new Tone.Filter(260, 'highpass'));
+      const shLp = T(new Tone.Filter(5200, 'lowpass', -12));
+      const shDl = T(new Tone.Delay(0.06, 0.5));
+      const shFb = T(new Tone.Gain(CLOUD.shimmerFb));
+      const shOut = T(new Tone.Gain(CLOUD.shimmerOut));
+      const cloudOut = T(new Tone.Gain(1));
+      let cloudShaperAmt = null;
+      try { cloudShaper = await makeShaperNode(); cloudShaperAmt = cloudShaper.parameters.get('amount'); }
+      catch (err) { cloudShaper = null; cloudShaperAmt = null; }
+      if (cloudShaper) { cloudBus.connect(cloudShaper); link(cloudShaper, cloudOut); } else { cloudBus.connect(cloudOut); }
+      cloudOut.connect(rev);
+      rev.connect(shP);
+      shP.chain(shHp, shLp);
+      shLp.connect(shOut);
+      shLp.chain(shDl, shFb);
+      shFb.connect(rev);
+
+      const airHp   = T(new Tone.Filter({ type: 'highpass', frequency: CLOUD.airHz, rolloff: -24 }));
+      const airComp = T(new Tone.Compressor({ threshold: -36, ratio: 4, attack: 0.004, release: 0.12 }));
+      const airLim  = T(new Tone.Limiter(-20));
+      const airG    = T(new Tone.Gain(CLOUD.airMix * b0.raw));
+
+      const micBus = T(new Tone.Gain(CLOUD.outGain));
+      const finalLim = T(new Tone.Limiter(-6));
+      const direct = T(new Tone.Gain(0.5));
+      const revOut = T(new Tone.Gain(0.9));
+      cloudOut.connect(direct); direct.connect(micBus);
+      rev.connect(revOut); revOut.connect(micBus);
+      shOut.connect(micBus);
+      procG.chain(airHp, airComp, airLim, airG, micBus);
+
+      let shaperAmt = null;
+      try { shaper = await makeShaperNode(); shaperAmt = shaper.parameters.get('amount'); }
+      catch (err) { console.warn('Transient shaper unavailable:', err); shaper = null; shaperAmt = null; }
+      rawComp = raw.createDynamicsCompressor();
+      rawComp.knee.value = 6; rawComp.attack.value = 0.001;
+      const rawLim = T(new Tone.Limiter(-10));
+      const rawG   = T(new Tone.Gain(b0.raw * CLOUD.rawGain));
+      const mix    = T(new Tone.Gain(1));
+      if (shaper) { guard.connect(shaper); link(shaper, rawComp); } else { guard.connect(rawComp); }
+      link(rawComp, rawLim);
+      rawLim.chain(rawG, mix);
+      micBus.connect(mix);
+      mix.chain(finalLim, out);
+
+      function applyShaper(amt, tc) {
+        const now = raw.currentTime;
+        if (shaperAmt) shaperAmt.setTargetAtTime(amt, now, tc);
+        rawComp.threshold.setTargetAtTime(-14 - 20 * amt, now, tc);
+        rawComp.ratio.setTargetAtTime(2 + 14 * amt, now, tc);
+        rawComp.release.setTargetAtTime(0.16 - 0.13 * amt, now, tc);
+      }
+      applyShaper(shaperAmount(effBlend()), 0.001);
+
+      let avg = 0.02, floor = 0.002, gateOpen = false, holdUntil = 0, duckUntil = 0, curBlend = effBlend();
+      const revLevel = () => 0.9 * spaceOf(curBlend);
+      const shLevel = () => CLOUD.shimmerOut * spaceOf(curBlend);
+      const sendLevel = () => 0.22 * spaceOf(curBlend);
+      function applySpace(tc) {
+        revOut.gain.rampTo(revLevel(), tc);
+        shOut.gain.rampTo(shLevel(), tc);
+        shFb.gain.rampTo(CLOUD.shimmerFb * spaceOf(curBlend), tc);
+        out.send.gain.rampTo(sendLevel(), tc);
+      }
+      revOut.gain.value = revLevel(); shOut.gain.value = shLevel(); out.send.gain.value = sendLevel();
+
+      return {
+        out,
+        update(f, t) {
+          const r = f.rawRms;
+          avg += (r - avg) * 0.015;
+          const makeup = clamp(CLOUD.target / Math.max(avg, 0.0015), 0.8, CLOUD.maxMakeup);
+          trim.gain.rampTo(makeup, 0.8);
+          floor += (r - floor) * (r < floor ? 0.2 : 0.004);
+          floor = Math.max(floor, 0.0005);
+          const k = gateOpen ? 0.85 : 1;
+          const loud = r > CLOUD.gateLoud * k;
+          const event = r > Math.max(floor * 1.8, CLOUD.gateMin) * k;
+          if (loud || event) { gateOpen = true; holdUntil = t + 0.8; }
+          else if (t > holdUntil) gateOpen = false;
+          gate.gain.rampTo(gateOpen ? 1 : CLOUD.gateClosed, gateOpen ? 0.06 : 0.6);
+          if (r > Math.max(CLOUD.duckMin, avg * 6) && t > duckUntil) {
+            const now = Tone.now();                                     // 20 ms dip, then a slow recovery: no step, no click
+            guard.gain.cancelScheduledValues(now);
+            guard.gain.setTargetAtTime(CLOUD.duckGain, now, 0.007);
+            guard.gain.setTargetAtTime(1, now + 0.05, 0.45);
+            duckUntil = t + 0.4;
+          }
+          state.glitch += (state.glitchTo - state.glitch) * 0.3;
+          state.density = clamp(0.35 + f.energy * 1.6, 0.35, 1);
+          state.pool = f.centroid > 0.62 ? pools.bright : f.centroid > 0.42 ? pools.mid : pools.dark;
+          cloudLp.frequency.rampTo(2200 + f.centroid * 4800, 0.5);
+          shFb.gain.rampTo(CLOUD.shimmerFb * spaceOf(curBlend) * (0.75 + 0.5 * clamp(f.energy * 2, 0, 1)), 1.0);
+        },
+        setBlend(v) {
+          const g = blendGains(v), a = shaperAmount(v);
+          procG.gain.rampTo(g.proc, 0.1);
+          rawG.gain.rampTo(g.raw * CLOUD.rawGain, 0.1);
+          airG.gain.rampTo(CLOUD.airMix * g.raw, 0.1);
+          const gl = glitchOf(v); state.glitchTo = gl;
+          if (cloudShaperAmt) cloudShaperAmt.setTargetAtTime(gl, raw.currentTime, 0.04);
+          applyShaper(a, 0.04);
+          curBlend = v; applySpace(0.2);
+        },
+        setScale(s) { pools = poolsFor(s); banks.set(s, 4); },
+        dispose() {
+          clearInterval(timer);
+          voices.forEach(v => { try { v.dly.disconnect(); v.env.disconnect(); v.pan.disconnect(); } catch (e) {} });
+          try { if (shaper) shaper.disconnect(); if (cloudShaper) cloudShaper.disconnect(); } catch (e) {}
+          try { if (rawComp) rawComp.disconnect(); } catch (e) {}
+          if (banks) banks.dispose();
+          disposeAll(nodes);
+        }
+      };
+    } catch (err) {
+      clearInterval(timer);
+      voices.forEach(v => { try { v.dly.disconnect(); v.env.disconnect(); v.pan.disconnect(); } catch (e) {} });
+      try { if (shaper) shaper.disconnect(); if (cloudShaper) cloudShaper.disconnect(); } catch (e) {}
+      try { if (rawComp) rawComp.disconnect(); } catch (e) {}
+      if (banks) banks.dispose();
+      disposeAll(nodes);
+      throw err;
+    }
+  }
+
+  // =====================================================================
+  //  DRONE GALAXY · WHITE + BINAURAL
+  // =====================================================================
+  const BIN = { tones: [sc => sc.root * 2, sc => sc.notes[4] * 2, sc => sc.notes[2] * 4], vols: [-20, -24, -28], beats: [6, 4.8, 7.5] };
+  function createBinaural(env) {
+    const nodes = [];
+    const T = n => (nodes.push(n), n);
+    const out = makeOut(env, nodes, 0.45, 1.0, { phaser: true });                   // binaural: keeps true L/R
+    const noise = T(new Tone.Noise('white'));
+    noise.volume.value = -22;
+    const nHp = T(new Tone.Filter(200, 'highpass'));
+    const nLp = T(new Tone.Filter(4000, 'lowpass', -12));
+    const autoPan = T(new Tone.AutoPanner({ frequency: 0.07, depth: 0.7 }));
+    const nGain = T(new Tone.Gain(0.6));
+    noise.chain(nHp, nLp, autoPan, nGain, out);
+    autoPan.start(); noise.start();
+    const banks = makeBanks(scale => {
+      const bn = [], B = n => (bn.push(n), n);
+      const g = B(new Tone.Gain(0));
+      BIN.tones.forEach((tone, i) => {
+        const f0 = tone(scale);
+        const l = B(new Tone.Oscillator(f0, 'sine'));
+        const r = B(new Tone.Oscillator(f0 + BIN.beats[i], 'sine'));
+        l.volume.value = BIN.vols[i]; r.volume.value = BIN.vols[i];
+        const pl = B(new Tone.Panner(-1)), pr = B(new Tone.Panner(1));
+        l.chain(pl, g); r.chain(pr, g);
+        const drift = B(new Tone.LFO({ frequency: 0.015 + Math.random() * 0.01, min: -6, max: 6, phase: Math.random() * 360 }));
+        drift.connect(l.detune); drift.connect(r.detune); drift.start();   // both ears drift together: the beat stays
+        l.start(); r.start();
+      });
+      return { g, nodes: bn };
+    }, out);
+    return {
+      out,
+      update(f) {
+        nLp.frequency.rampTo(1200 + f.centroid * 3000 + f.energy * 3500, 0.5);
+        nGain.gain.rampTo(0.4 + 0.6 * clamp(f.energy * 2, 0, 1), 0.5);
+        autoPan.frequency.rampTo(0.05 + f.energy * 0.25, 0.6);
+      },
+      setScale(s) { banks.set(s, 4); },
+      dispose() { banks.dispose(); disposeAll(nodes); }
+    };
+  }
+
+  // =====================================================================
+  //  DRONE GALAXY · GRANULAR
+  // =====================================================================
+  let grainBuf = null;
+  function getGrainBuffer() {
+    if (grainBuf) return grainBuf;
+    const sr = Tone.getContext().sampleRate;
+    const n = Math.floor(sr * 14);
+    const data = new Float32Array(n);
+    const f0 = 73.4162;
+    const parts = [];
+    for (let h = 1; h <= 9; h++) parts.push({ f: f0 * h, a: 1 / Math.pow(h, 1.15), r: 0.05 + Math.random() * 0.15, ph: Math.random() * TAU, ph2: Math.random() * TAU, env: 1 });
+    let lp = 0;
+    for (let i = 0; i < n; i++) {
+      const t = i / sr;
+      if ((i & 127) === 0) for (const p of parts) p.env = 0.55 + 0.45 * Math.sin(TAU * p.r * t + p.ph2);
+      let s = 0;
+      for (const p of parts) s += Math.sin(TAU * p.f * t + p.ph) * p.a * p.env;
+      lp += ((Math.random() * 2 - 1) - lp) * 0.02;
+      data[i] = s + lp * 3;
+    }
+    let peak = 0;
+    for (let i = 0; i < n; i++) { const a = Math.abs(data[i]); if (a > peak) peak = a; }
+    const k = 0.7 / (peak || 1);
+    for (let i = 0; i < n; i++) data[i] *= k;
+    grainBuf = Tone.ToneAudioBuffer.fromArray(data);
+    return grainBuf;
+  }
+  const GLAYERS = [
+    { det: sc => 0,                          rate: 0.15, sizeK: 1.00, vol: -6,  pan: -0.4, at: 0,    depth: 5  },
+    { det: sc => sc.degrees[2] * 100,        rate: 0.10, sizeK: 1.25, vol: -9,  pan: 0.5,  at: 0.06, depth: 10 },
+    { det: sc => -1200,                      rate: 0.25, sizeK: 1.10, vol: -6,  pan: 0.0,  at: 0,    depth: 4  },
+    { det: sc => 1200 + sc.degrees[4] * 100, rate: 0.07, sizeK: 0.75, vol: -12, pan: -0.6, at: 0.25, depth: 14 }
+  ];
+  function createGranular(env) {
+    const nodes = [];
+    const T = n => (nodes.push(n), n);
+    const out = makeOut(env, nodes, 0.9, 0.5, { phaser: true, hrtf: true });
+    const buf = getGrainBuffer();
+    const filt = T(new Tone.Filter(1600, 'lowpass', -24));
+    filt.connect(out);
+    const banks = makeBanks(scale => {
+      const bn = [], B = n => (bn.push(n), n);
+      const g = B(new Tone.Gain(0));
+      const players = GLAYERS.map(L => {
+        const ls = Math.random() * (buf.duration - 6);
+        const p = B(new Tone.GrainPlayer({
+          url: buf, loop: true, grainSize: 0.4 * L.sizeK, overlap: 0.2,
+          playbackRate: L.rate, detune: L.det(scale) + scale.cents, volume: L.vol - L.depth,
+          loopStart: ls, loopEnd: ls + 4
+        }));
+        const pan = B(new Tone.Panner(L.pan));
+        p.chain(pan, g);
+        p.start();
+        return p;
+      });
+      return { g, nodes: bn, players };
+    }, filt);
+    const timer = setInterval(() => {
+      banks.each(b => b.players.forEach(p => {
+        try { const w = 1.5 + Math.random() * 3; const a = Math.random() * (buf.duration - w - 0.1); p.loopStart = a; p.loopEnd = a + w; } catch (e) {}
+      }));
+    }, 4000);
+    return {
+      out,
+      update(f, t) {
+        const b = banks.cur;
+        if (!b) return;
+        const bloomBase = clamp(f.energy * 2.2, 0, 1);
+        const size = 0.5 - f.centroid * 0.3;
+        b.players.forEach((p, i) => {
+          const L = GLAYERS[i];
+          const bloom = clamp((bloomBase - L.at) / 0.4, 0, 1);
+          const gs = size * L.sizeK;
+          p.grainSize = gs;
+          p.overlap = Math.max(0.05, gs * 0.5);
+          p.volume.rampTo(L.vol - L.depth * (1 - bloom), 0.5);
+        });
+        filt.frequency.rampTo(500 + f.centroid * 2600 + bloomBase * 2200 + Math.sin(t * 0.2) * 250, 0.4);
+        filt.Q.rampTo(0.7 + bloomBase * 2.5, 0.4);
+      },
+      setScale(s) { banks.set(s, 4); },
+      dispose() { clearInterval(timer); banks.dispose(); disposeAll(nodes); }
+    };
+  }
+
+  // =====================================================================
+  //  DRONE GALAXY · PURE SINE BANK
+  // =====================================================================
+  function createSine(env) {
+    const nodes = [];
+    const T = n => (nodes.push(n), n);
+    const out = makeOut(env, nodes, 1.0, 0.6, { phaser: true, hrtf: true });
+    const inner = T(new Tone.Gain(1));
+    const soft = T(new Tone.Filter(2600, 'lowpass', -12));
+    soft.chain(inner, out);
+    const pans = [-0.7, 0.5, -0.3, 0.7, -0.5, 0.3];
+    const banks = makeBanks(scale => {
+      const bn = [], B = n => (bn.push(n), n);
+      const g = B(new Tone.Gain(0));
+      const voices = scale.freqs.map((f, i) => {
+        const osc = B(new Tone.Oscillator(f, 'sine'));
+        osc.volume.value = -9 - i * 1.5;
+        const trem = B(new Tone.Gain(0));
+        const lfo = B(new Tone.LFO({ frequency: 0.025 + Math.random() * 0.07, min: 0.04, max: 0.5, phase: Math.random() * 360 }));
+        lfo.connect(trem.gain);
+        const band = B(new Tone.Gain(0.6));
+        const pan = B(new Tone.Panner(pans[i]));
+        const drift = B(new Tone.LFO({ frequency: 0.01 + Math.random() * 0.02, min: -5, max: 5, phase: Math.random() * 360 }));
+        drift.connect(osc.detune); drift.start();                       // analogue drift: ±5 cents, never twice the same
+        osc.chain(trem, band, pan, g);
+        osc.start(); lfo.start();
+        return { osc, band };
+      });
+      return { g, nodes: bn, voices };
+    }, soft);
+    return {
+      out,
+      update(f) {
+        const b = banks.cur;
+        if (!b) return;
+        const bloom = clamp(f.energy * 2.2, 0, 1);
+        b.voices.forEach((v, i) => v.band.gain.rampTo(0.3 + 0.7 * clamp((bloom - i * 0.13) / 0.4, 0, 1), 0.6));
+        soft.frequency.rampTo(900 + f.centroid * 2400 + f.energy * 1800, 0.5);
+        inner.gain.rampTo(0.65 + 0.35 * bloom, 0.6);
+      },
+      setScale(s) { banks.set(s, 4); },
+      dispose() { banks.dispose(); disposeAll(nodes); }
+    };
+  }
+
+  // =====================================================================
+  //  HARMONIC BRIDGE · sounds only when you float between two galaxies.
+  //  Both galaxies share the session's scale, so the bridge plays the chord that joins them:
+  //  half its voices lean toward one galaxy, half toward the other, and both pools ring together.
+  // =====================================================================
+  function createBridge(env) {
+    const nodes = [];
+    const T = n => (nodes.push(n), n);
+    const out = makeOut(env, nodes, 0.7, 0.8);
+    const lp = T(new Tone.Filter(2400, 'lowpass', -12));
+    lp.connect(out);
+    const pans = [];
+    const banks = makeBanks(scale => {
+      const bn = [], B = n => (bn.push(n), n);
+      const g = B(new Tone.Gain(0));
+      // the joining chord: root, fifth, ninth, third, seventh across the middle register
+      const tones = [scale.root * 2, scale.notes[4] * 2, scale.notes[1] * 4, scale.notes[2] * 4, scale.notes[6] * 4, scale.notes[4] * 4];
+      pans.length = 0;
+      tones.forEach((f, i) => {
+        const osc = B(new Tone.Oscillator(f, i % 2 ? 'triangle' : 'sine'));
+        osc.volume.value = -16 - i * 1.2;
+        const trem = B(new Tone.Gain(0));
+        const lfo = B(new Tone.LFO({ frequency: 0.05 + Math.random() * 0.08, min: 0.15, max: 0.8, phase: Math.random() * 360 }));
+        lfo.connect(trem.gain);
+        const pan = B(new Tone.Panner(0));
+        pans.push(pan);
+        osc.chain(trem, pan, g);
+        osc.start(); lfo.start();
+      });
+      return { g, nodes: bn };
+    }, lp);
+    return {
+      out,
+      setSides(pa, pb) { pans.forEach((p, i) => p.pan.rampTo(clamp(i % 2 ? pb : pa, -1, 1) * 0.9, 0.3)); },
+      update(f) { lp.frequency.rampTo(1600 + f.energy * 4000 + f.centroid * 1500, 0.5); },
+      setScale(s) { banks.set(s, 4); },
+      dispose() { banks.dispose(); disposeAll(nodes); }
+    };
+  }
+
+  // =====================================================================
+  //  EARTH · the root drone at (0, 0)
+  //  The Schumann resonance (7.83 Hz) raised four octaves: 125.28 Hz, with its sub-octave, a quiet fifth and an
+  //  octave, gently pulsed at 7.83 Hz itself. A background fetch (optional, see SCHUMANN.url) can nudge it by a few cents.
+  // =====================================================================
+  const SCHUMANN = {
+    base: 7.83,
+    url: '',             // optional JSON endpoint returning the current fundamental, e.g. {"frequency": 7.86}. Empty = no network call
+    every: 15 * 60e3,    // how often to ask (ms)
+    cents: 0,
+    live: false          // true once a real reading has arrived; until then Earth follows its natural drift
+  };
+  // Natural drift: until live data exists, Earth wanders slowly through the resonance's real range (7.75 - 7.95 Hz).
+  // Two slow, unrelated cycles (5.3 h and 2.1 h) driven by the clock, so it changes through the day, never repeats
+  // exactly, and is the same on every device at the same moment.
+  function naturalHz() {
+    const h = Date.now() / 3.6e6;
+    return 7.85 + 0.1 * (0.6 * Math.sin(2 * Math.PI * h / 5.3) + 0.4 * Math.sin(2 * Math.PI * h / 2.1 + 1.3));
+  }
+  const earthCents = () => SCHUMANN.live ? SCHUMANN.cents : 1200 * Math.log2(naturalHz() / SCHUMANN.base);
+  setInterval(() => { if (session && session.engines.earth) session.engines.earth.setCents(earthCents(), 60); }, 60e3);
+  function createEarth(env) {
+    const nodes = [];
+    const T = n => (nodes.push(n), n);
+    const out = makeOut(env, nodes, 0.6, 0.9, { hrtf: true });
+    const f0 = SCHUMANN.base * 16;                                      // 125.28 Hz
+    const sum = T(new Tone.Gain(1));
+    const oscs = [[f0, -13, 'sine'], [f0 / 2, -11, 'sine'], [f0 * 1.5, -25, 'sine'], [f0 * 2, -27, 'triangle']].map(([f, v, t]) => {
+      const o = T(new Tone.Oscillator(f, t)); o.volume.value = v; o.connect(sum); o.start(); return o;
+    });
+    // storm layer: upper partials of the Earth tone that only open when the planet's magnetic field is agitated
+    const stormG = T(new Tone.Gain(0));
+    [[f0 * 3, -22, 'sine'], [f0 * 4, -26, 'triangle'], [f0 * 5, -30, 'sine']].forEach(([f, v, t]) => {
+      const o = T(new Tone.Oscillator(f, t)); o.volume.value = v; o.connect(stormG); o.start(); oscs.push(o);
+    });
+    stormG.connect(sum);
+    const pulse = T(new Tone.Gain(0.85));
+    const lfo = T(new Tone.LFO({ frequency: SCHUMANN.base, min: 0.7, max: 1 }));
+    lfo.connect(pulse.gain); lfo.start();
+    const lp = T(new Tone.Filter(900, 'lowpass', -12));
+    sum.chain(pulse, lp, out);
+    let warm = 0, storm = 0;
+    return {
+      out,
+      setWarm(v) { warm = v; },
+      setStorm(v) {                                                    // v: 0 (Kp 0, quiet) .. 1 (Kp 9, extreme storm)
+        storm = v;
+        stormG.gain.rampTo(Math.pow(v, 0.8), 20);                      // storms bring in the upper partials, slowly
+        lfo.min = 0.7 - 0.35 * v;                                      // and the 7.83 Hz pulse beats deeper
+      },
+      setCents(c, sec) { oscs.forEach(o => o.detune.rampTo(c, sec)); lfo.frequency.rampTo(SCHUMANN.base * Math.pow(2, c / 1200), sec); },
+      update(f) { lp.frequency.rampTo((600 + f.energy * 1400) * (1 + 1.6 * storm) * (1 - 0.45 * warm), 0.5); },
+      dispose() { disposeAll(nodes); }
+    };
+  }
+  // Optional live reading. Never blocks, never shows an error: on any failure the drone simply stays at 7.83 Hz.
+  async function pollSchumann() {
+    if (!SCHUMANN.url) return;
+    try {
+      const ctl = new AbortController(), to = setTimeout(() => ctl.abort(), 4000);
+      const r = await fetch(SCHUMANN.url, { signal: ctl.signal, cache: 'no-store' });
+      clearTimeout(to);
+      const j = await r.json();
+      const f = +(j.frequency ?? j.f ?? j.hz ?? j.value);
+      if (f > 7 && f < 9) {
+        SCHUMANN.cents = clamp(1200 * Math.log2(f / SCHUMANN.base), -30, 30);
+        SCHUMANN.live = true;
+        if (session && session.engines.earth) session.engines.earth.setCents(SCHUMANN.cents, 30);
+      }
+    } catch (e) {}
+  }
+  pollSchumann(); setInterval(pollSchumann, SCHUMANN.every);
+
+  // ---------- Live geomagnetic activity (NOAA Space Weather Prediction Center, public, updated every minute) ----------
+  // The planetary K-index (Kp 0-9) measures how agitated Earth's magnetic field is right now. It shapes the Earth drone:
+  // quiet days keep it soft and distant; storms open its upper partials, brighten it and deepen its pulse.
+  const GEO = { url: 'https://services.swpc.noaa.gov/json/planetary_k_index_1m.json', every: 5 * 60e3, kp: null, level: 0 };
+  async function pollKp() {
+    try {
+      const ctl = new AbortController(), to = setTimeout(() => ctl.abort(), 6000);
+      const r = await fetch(GEO.url, { signal: ctl.signal, cache: 'no-store' });
+      clearTimeout(to);
+      const rows = await r.json();
+      const last = rows[rows.length - 1];
+      const kp = +(last.estimated_kp ?? last.kp_index);
+      if (!(kp >= 0 && kp <= 9)) return;
+      GEO.kp = kp; GEO.level = kp / 9;
+      if (session && session.engines.earth) session.engines.earth.setStorm(GEO.level);
+      showKpLine();
+    } catch (e) {}                                                     // offline or blocked: Earth simply stays calm
+  }
+  pollKp(); setInterval(pollKp, GEO.every);
+
+  // =====================================================================
+  //  RESAMPLED GALAXY · a saved moment, looping as a grain cloud (original pitch, so it stays in key)
+  // =====================================================================
+  function createSample(env, audioBuffer) {
+    const nodes = [];
+    const T = n => (nodes.push(n), n);
+    const out = makeOut(env, nodes, 0.5, 0.9, { phaser: true, hrtf: true });
+    const dur = audioBuffer.duration;
+    const p = T(new Tone.GrainPlayer({ url: audioBuffer, loop: true, grainSize: 0.18, overlap: 0.09, playbackRate: 1,
+      loopStart: Math.min(0.08, dur * 0.1), loopEnd: Math.max(0.2, dur - 0.05) }));
+    const filt = T(new Tone.Filter(5000, 'lowpass', -12));
+    p.chain(filt, out);
+    p.start();
+    return {
+      out,
+      update(f) {
+        filt.frequency.rampTo(1400 + f.energy * 9000 + f.centroid * 2000, 0.4);
+        p.grainSize = 0.12 + (1 - f.energy) * 0.2;
+        p.overlap = p.grainSize * 0.5;
+      },
+      dispose() { disposeAll(nodes); }
+    };
+  }
+
+  // =====================================================================
+  //  SPACE: your position, the other galaxies
+  // =====================================================================
+  const P = { x: 0, y: 0 };
+  const C = { x: 0, y: 0 };           // the camera follows your core softly, so the core itself can be dragged across the screen
+  const vel = { x: 0, y: 0 };
+  let glide = null;
+  const galaxies = [];
+  let gid = 0, sampleCount = 0;
+  const GLYPHS = '·.:+-=/\\#[*'.split('');
+
+  function makeGalaxy(kind, x, y, o = {}) {
+    const g = {
+      id: ++gid, kind, x, y, r: o.r || 40, range: o.range || SPACE.range, level: o.level != null ? o.level : 0.6,
+      label: o.label || kind, infl: 0, act: 0, buffer: o.buffer || null, engine: null, born: performance.now(), showUntil: 0,
+      dust: !!o.dust, earth: !!o.earth, planet: !!o.planet, breath: Math.random() * 4, glow: 0, tilt: rand(-1.2, 1.2), flat: rand(0.35, 0.7), spin: Math.random() < 0.5 ? -1 : 1,
+      parts: [], orbits: [], sats: []
+    };
+    const n = o.n != null ? o.n : (LITE ? 70 : 150);
+    for (let i = 0; i < n; i++) {
+      const u = Math.pow(Math.random(), 0.75);
+      g.parts.push({ a: rand(0, TAU), rad: g.r * 1.25 + u * g.r * (o.disk || 3.6), ch: pick(GLYPHS), al: rand(0.12, 0.55), wob: rand(0, TAU) });
+    }
+    const no = o.dust ? 1 : 3;
+    for (let i = 0; i < no; i++) g.orbits.push({ rad: g.r * rand(1.5, 1.4 + (o.disk || 3.4)), flat: rand(0.3, 0.75), tilt: g.tilt + rand(-0.7, 0.7) });
+    const ns = o.sats != null ? o.sats : 3;
+    for (let i = 0; i < ns; i++) g.sats.push({ ob: pick(g.orbits), a: rand(0, TAU), sp: rand(0.05, 0.16) * (Math.random() < 0.5 ? -1 : 1), s: rand(3, 8) });
+    return g;
+  }
+
+  // A wide universe: the stones are born far apart, in different directions, so each drone can be heard on its own
+  // and the space between them stays dark and mysterious. One stone is always born near enough to see when you enter.
+  function resetPositions() { vel.x = vel.y = 0; glide = { x: 0, y: 0 }; }       // C: drift back home
+  function placeWorld() {
+    galaxies.push(makeGalaxy('earth', 0, 0, { earth: true, label: 'earth', r: 30, level: 0.55, n: 0, sats: 0 }));
+    const defs = [
+      ['binaural', 'white + binaural', 0.55, 72],
+      ['granular', 'granular drone', 0.65, 94],
+      ['sine', 'pure sine bank', 0.6, 64]
+    ];
+    const pts = [{ x: 0, y: 0 }];
+    defs.forEach(([k, label, lv, r]) => {
+      let x, y, tries = 0;
+      do { const R = SPACE.place, a = rand(0, TAU), d = pts.length === 1 ? rand(0.42, 0.52) * R : rand(0.9, 1.7) * R; x = Math.cos(a) * d; y = Math.sin(a) * d; tries++; }
+      while (tries < 300 && (pts.some(p => Math.hypot(p.x - x, p.y - y) < SPACE.place * 0.95) || (pts.length === 1 && Math.abs(y) > SPACE.place * 0.28)));
+      pts.push({ x, y });
+      galaxies.push(makeGalaxy(k, x, y, { label, level: lv, r, planet: true, disk: 2.3, sats: 2 }));
+    });
+    for (let i = 0; i < 7; i++) {                                     // silent, faraway dust galaxies: only scenery
+      const a = rand(0, TAU), d = rand(900, 2600);
+      galaxies.push(makeGalaxy('dust', Math.cos(a) * d, Math.sin(a) * d, { dust: true, r: rand(6, 14), n: LITE ? 25 : 50, sats: 0, level: 0 }));
+    }
+  }
+  placeWorld();
+
+  const audible = g => !g.dust;
+  const roaming = g => !g.dust && !g.earth;                              // orbs you can touch, bridge between and fly to
+  // torus: every distance is measured to the nearest copy of the orb
+  const wrapD = d => d - SPACE.world * Math.round(d / SPACE.world);
+  const relX = g => wrapD(g.x - P.x), relY = g => wrapD(g.y - P.y);
+
+  // =====================================================================
+  //  MIC ANALYSIS, 20x per second: features, key detection, spatial mix
+  // =====================================================================
+  const feat = { rawRms: 0, level: 0, energy: 0, centroid: 0.5 };
+  const localFeat = { rawRms: 0, level: 0, energy: 0, centroid: 0.5 };
+
+  // Are you floating between two galaxies? Strongest in the middle of the line that joins them.
+  const BRIDGE = { a: null, b: null, v: 0, width: 170 };
+  function findBridge() {
+    let best = 0, ba = null, bb = null;
+    const list = galaxies.filter(roaming);
+    for (let i = 0; i < list.length; i++) for (let j = i + 1; j < list.length; j++) {
+      const A = list[i], B = list[j];
+      const ax = relX(A), ay = relY(A), bx = relX(B), by = relY(B);         // both relative to you
+      const abx = bx - ax, aby = by - ay, L2 = abx * abx + aby * aby, L = Math.sqrt(L2);
+      if (L < 60 || L > 2000) continue;
+      const t = (-ax * abx - ay * aby) / L2;
+      if (t <= 0.05 || t >= 0.95) continue;
+      const d = Math.hypot(ax + abx * t, ay + aby * t);
+      const v = Math.sin(Math.PI * t) * smooth(clamp(1 - d / BRIDGE.width, 0, 1)) * Math.min(A.level, B.level, 0.8) / 0.8;
+      if (v > best) { best = v; ba = A; bb = B; }
+    }
+    BRIDGE.v += (best - BRIDGE.v) * 0.12;
+    if (ba) { BRIDGE.a = ba; BRIDGE.b = bb; }
+    if (BRIDGE.v < 0.003) { BRIDGE.a = BRIDGE.b = null; }
+  }
+
+  function applySpatial(rt) {
+    if (!session) return;
+    const bv = BRIDGE.v;
+    for (const g of galaxies) {
+      const e = g.engine; if (!e) continue;
+      const near = g.infl, onBridge = (g === BRIDGE.a || g === BRIDGE.b) ? bv : 0;
+      const dx = relX(g), dy = relY(g), d = Math.hypot(dx, dy);
+      // full level inside the orb, then an even straight line to silence at maxDistance
+      const ref = g.r * (g.planet ? 1.6 : 2.2);
+      const curve = clamp(1 - Math.max(0, d - ref) / (g.range - ref), 0, 1);
+      const presence = curve * 0.85 * Math.pow(g.level, 1.5) * (g.kind === 'sample' ? 1.2 : 1) * (1 + 0.6 * onBridge);
+      e.out.gain.rampTo(presence, rt);
+      // depth from Y: an orb above you sits further back in the room (more reverb), one below you sits closer
+      const depth = clamp(-dy / g.range, -1, 1);
+      e.out.dry.gain.rampTo(e.out.baseDry * smooth(clamp(near * 1.15 + 0.2, 0, 1)) * (1 - 0.3 * Math.max(0, depth)), rt);
+      e.out.send.gain.rampTo(e.out.baseSend * (0.45 + 1.6 * (1 - near)) * (1 + 0.7 * depth), rt);
+      // air absorption: 20 kHz beside the orb down to 200 Hz at the far edge (log scale, like sound through steam or walls)
+      const intensity = Math.max(clamp(1 - d / g.range, 0, 1), 0.95 * onBridge);
+      e.out.lp.frequency.rampTo(SPACE.cutoffMin + intensity * SPACE.cutoffSpan, rt);
+      if (e.out.pan3d) {
+        // HRTF: the map lies flat around your head. Right on screen = right ear, up on screen = in front, down = behind.
+        let px = dx / (g.range * 0.45), pz = dy / (g.range * 0.45);
+        const m = Math.hypot(px, pz); if (m > 2.5) { px *= 2.5 / m; pz *= 2.5 / m; }
+        if (m < 0.12) { pz = -0.12; }                                   // never exactly inside your head
+        e.out.pan3d.positionX.rampTo(px, rt); e.out.pan3d.positionZ.rampTo(pz, rt);
+      } else {
+        // equal-power stereo position (the stereo panner node is equal-power)
+        e.out.panner.pan.rampTo(clamp(dx / (g.range * 0.55), -1, 1) * 0.9, rt);
+      }
+      // fog: the further away, the more of it dissolves into the diffused, octave-down mist
+      if (e.out.fog) e.out.fog.gain.rampTo(0.7 * Math.pow(1 - intensity, 1.3) * (1 - 0.75 * earthPull), rt);   // returning to Earth clears the steam
+      // moiré: between two orbs both phasers wake up and swing against each other
+      if (e.out.phaser) e.out.phaser.wet.rampTo(0.6 * onBridge, rt);
+    }
+    const br = session.engines.bridge;
+    if (br) {
+      br.out.gain.rampTo(0.75 * Math.pow(bv, 1.3), rt);
+      if (BRIDGE.a) br.setSides(clamp(relX(BRIDGE.a) / 300, -1, 1), clamp(relX(BRIDGE.b) / 300, -1, 1));
+    }
+  }
+
+  function analyse() {
+    if (!session) return;
+    const input = session.input;
+    const w = input.wave.getValue();
+    let sum = 0;
+    for (let i = 0; i < w.length; i++) sum += w[i] * w[i];
+    const rms = Math.sqrt(sum / w.length);
+    feat.rawRms = rms;
+    const tl = Math.min(1, Math.sqrt(rms) * 2.6);
+    feat.level += (tl - feat.level) * (tl > feat.level ? 0.5 : 0.12);
+    feat.energy += (feat.level - feat.energy) * 0.05;
+
+    const spec = input.fft.getValue();
+    const sr = Tone.getContext().sampleRate;
+    const binHz = sr / 2 / spec.length;
+    const kMin = Math.max(1, Math.floor(80 / binHz)), kMax = Math.min(spec.length - 1, Math.floor(8000 / binHz));
+    let tot = 0, cw = 0;
+    for (let k = kMin; k <= kMax; k++) {
+      const db = spec[k];
+      const mag = (isFinite(db) && db > -100) ? Math.pow(10, db / 20) : 0;
+      tot += mag; cw += mag * k * binHz;
+    }
+    if (tot > 2e-5) {
+      const cN = clamp(Math.log2((cw / tot) / 100) / Math.log2(8000 / 100), 0, 1);
+      feat.centroid += (cN - feat.centroid) * 0.18;
+    }
+
+    session.tick++;
+    if (session.tick % 4 === 0) { try { scaleTick(); } catch (e) { console.error('scale', e); } }
+
+    findBridge();
+    {
+      let near = BRIDGE.v;
+      for (const g of galaxies) if (roaming(g)) near = Math.max(near, g.infl * Math.min(1, g.level * 1.4));
+      blendAuto += (6 + 92 * smooth(clamp(near * 1.2, 0, 1)) - blendAuto) * 0.06;
+      const target = clamp(blendAuto + blendOffset, 0, 100);
+      if (Math.abs(target - blendVal) >= 1) setBlend(target);
+    }
+    applySpatial(0.12);
+
+    // Your sound reaches the other galaxies through space: the closer you are, the more they answer it.
+    const t = performance.now() / 1000;
+    const engines = session.engines;
+    if (engines.earth) engines.earth.setWarm(earthPull);
+    for (const id in engines) {
+      const e = engines[id];
+      let f = feat;
+      if (e.galaxy) {
+        const k = 0.2 + 0.8 * e.galaxy.infl;
+        localFeat.rawRms = feat.rawRms; localFeat.centroid = feat.centroid;
+        localFeat.level = feat.level * k; localFeat.energy = feat.energy * k;
+        f = localFeat;
+      }
+      try { if (e.update) e.update(f, t); } catch (err) { console.error(id, err); }
+    }
+  }
+
+  let keyText = '';
+  function showKpLine() {
+    if (!keyText) return;
+    keyLine.textContent = keyText + (GEO.kp != null ? ' · earth kp ' + GEO.kp.toFixed(1) : '');
+  }
+  function showKey(scale, detected) {
+    keyText = NOTE_NAMES[scale.pc] + ' ' + (scale.mode === 'harmonic' ? 'harmonic minor' : scale.mode);
+    showKpLine();
+    keyLine.classList.toggle('on', !!detected);
+  }
+  function lockScale(scale, detected) {
+    const s = session.scale;
+    s.locked = true; s.current = scale; s.detected = detected;
+    session.input.stopKeyAnalysis();                                   // the key is fixed: no need to keep listening for it
+    const owner = session;
+    ['mic', 'sine', 'binaural', 'granular', 'bridge'].forEach((id, i) => {
+      setTimeout(() => {
+        if (session !== owner || !owner.engines[id]) return;
+        try { owner.engines[id].setScale(scale); } catch (e) { console.error(id, e); }
+      }, i * 450);
+    });
+    showKey(scale, detected);
+    console.info('[PITCH] scale decided:', scale.name, detected ? '(from the microphone)' : '(default)', '· field:', fieldSource());
+  }
+  function scaleTick() {
+    const s = session.scale;
+    if (s.locked) return;
+    if (session.input.usingFallback) { lockScale(fallbackScale(), false); return; }
+    s.elapsed += 0.2;
+    if (feat.rawRms >= 0.0015) {
+      const spec = session.input.keyFft.getValue(), sr = Tone.getContext().sampleRate;
+      const n = addPeaks(spec, sr, s.chroma);
+      addSoft(spec, sr, s.soft);
+      if (s.elapsed % 0.6 < 0.2) fieldHum(session.input.humFft.getValue(), sr);
+      s.peaks += n;
+      if (n > 0) s.tonal += 0.2;
+    }
+    if (s.tonal >= SCALE_CFG.analysisSec && s.peaks >= SCALE_CFG.minPeaks) {
+      const found = detectScale(s.chroma);
+      if (found) { lockScale(found, true); return; }
+    }
+    if (s.elapsed >= SCALE_CFG.maxSec) {
+      const best = detectScale(s.soft, true);
+      if (best) lockScale(best, true); else lockScale(fallbackScale(), false);
+    }
+  }
+
+  // =====================================================================
+  //  SESSION
+  // =====================================================================
+  function attachSample(g) {
+    if (!session) return;
+    try {
+      const env = { bus: modeBus, reverbIn, fogIn, input: session.input };
+      const e = createSample(env, g.buffer);
+      e.galaxy = g; g.engine = e;
+      session.engines['s' + g.id] = e;
+    } catch (err) { console.error('sample galaxy', err); }
+  }
+
+  function disposeEngine(e) {
+    try { if (e.pluck) e.pluck.dispose(); } catch (err) {}
+    try { e.dispose(); } catch (err) {}
+  }
+  function endSession() {
+    if (!session) return;
+    const s = session; session = null;
+    clearInterval(s.timer);
+    keyLine.textContent = ''; keyLine.classList.remove('on');
+    for (const id in s.engines) disposeEngine(s.engines[id]);
+    galaxies.forEach(g => { g.engine = null; });
+    try { s.input.dispose(); } catch (e) {}
+  }
+
+  async function start() {
+    if (!window.Tone) { flash('loading sound… tap again in a moment'); window.loadTone((window.__toneLoading || 0) + 1); return; }
+    busy = true;
+    let input = null;
+    try {
+      await Tone.start();
+      await ensureBuilt();
+      clearTimeout(stopTimer);
+      fading = false;
+      fade.gain.cancelScheduledValues(Tone.now());
+      if (!session) {
+        input = await openInput();
+        const env = { bus: modeBus, reverbIn, fogIn, input };
+        const engines = {};
+        try {
+          engines.mic = await createMic(env);
+          engines.binaural = createBinaural(env);
+          engines.granular = createGranular(env);
+          engines.sine = createSine(env);
+          engines.earth = createEarth(env);
+          engines.bridge = createBridge(env);
+        } catch (err) {
+          for (const id in engines) disposeEngine(engines[id]);
+          throw err;
+        }
+        feat.level = 0; feat.energy = 0; feat.centroid = 0.5; feat.rawRms = 0;
+        engines.mic.setBlend(effBlend());
+        engines.mic.out.gain.rampTo(0.9, 1);
+        ['binaural', 'granular', 'sine', 'earth'].forEach(k => {
+          const g = galaxies.find(x => x.kind === k);
+          engines[k].galaxy = g; g.engine = engines[k];
+        });
+        session = {
+          input, engines, tick: 0,
+          scale: { locked: false, current: DEFAULT_SCALE, detected: false, chroma: new Array(12).fill(0), soft: new Array(12).fill(0), elapsed: 0, tonal: 0, peaks: 0 },
+          timer: setInterval(analyse, 50)
+        };
+        input = null;
+        galaxies.filter(g => g.kind === 'sample').forEach(attachSample);
+        applySpatial(1.0);
+        engines.earth.setCents(earthCents(), 4);
+        engines.earth.setStorm(GEO.level);
+        initMidi();
+        keyLine.textContent = 'listening'; keyLine.classList.remove('on');
+      }
+      fade.gain.rampTo(1, 3);
+      running = true;
+      setStatus(statusText());
+    } catch (err) {
+      console.error(err);
+      running = false;
+      if (input) { try { input.dispose(); } catch (e) {} }
+      endSession();
+      if (fade) fade.gain.rampTo(0, 0.3);
+      setStatus('could not start audio');
+    }
+    busy = false;
+  }
+
+  function stop() {
+    running = false; fading = true;
+    fade.gain.cancelScheduledValues(Tone.now());
+    fade.gain.rampTo(0, 2);
+    clearTimeout(stopTimer);
+    stopTimer = setTimeout(() => {
+      fading = false;
+      if (recorder) stopRec();
+      endSession();
+      setStatus(statusText());
+    }, 2200);
+  }
+  function togglePlay() { if (busy) return; running ? stop() : start(); hideHint(); }
+
+  // =====================================================================
+  //  SAVE · RESAMPLE
+  //  Records what you hear; when you stop, that moment is born as a new galaxy next to you.
+  // =====================================================================
+  let recorder = null, recStartTs = 0, recTick = null, lastWavUrl = null, recLimit = 30;
+
+  async function startRec(fossil) {
+    if (!running || !built) { flash('tap your core to play first'); return; }
+    if (typeof MediaRecorder === 'undefined') { flash('recording is not supported in this browser'); return; }
+    try {
+      recorder = new Tone.Recorder();
+      outTap.connect(recorder);
+      await recorder.start();
+    } catch (err) {
+      console.error(err);
+      if (recorder) { try { outTap.disconnect(recorder); recorder.dispose(); } catch (e) {} }
+      recorder = null; flash('could not start recording'); return;
+    }
+    recStartTs = Date.now();
+    recLimit = fossil ? SPACE.fossilSec : SPACE.maxRec;
+    recBtn.classList.add('recording'); recTime.classList.add('on'); recTime.textContent = '0:00';
+    recTick = setInterval(() => {
+      const t = (Date.now() - recStartTs) / 1000;
+      recTime.textContent = Math.floor(t / 60) + ':' + String(Math.floor(t % 60)).padStart(2, '0');
+      if (t >= recLimit) stopRec();
+    }, 200);
+  }
+
+  async function stopRec() {
+    if (!recorder) return;
+    const r = recorder; recorder = null;
+    clearInterval(recTick);
+    recBtn.classList.remove('recording'); recTime.classList.remove('on');
+    let blob = null;
+    try { blob = await r.stop(); } catch (err) { console.error(err); }
+    try { outTap.disconnect(r); } catch (e) {}
+    try { r.dispose(); } catch (e) {}
+    if (!blob || !blob.size) { flash('the recording came out empty'); return; }
+    let ab = null;
+    try { ab = await Tone.getContext().decodeAudioData(await blob.arrayBuffer()); }
+    catch (err) { console.warn('decode failed', err); flash('could not resample this take'); return; }
+    if (ab.duration < 0.4) { flash('too short to resample'); return; }
+
+    // the new galaxy is born close to you
+    const a = rand(0, TAU), d = rand(150, 210);
+    const g = makeGalaxy('sample', wrapD(P.x + Math.cos(a) * d), wrapD(P.y + Math.sin(a) * d),
+      { label: 'fossil ' + (++sampleCount), r: 16 + Math.min(14, ab.duration), level: 0.7, buffer: ab, n: 90, sats: 2 });
+    galaxies.push(g);
+    attachSample(g);
+
+    if (lastWavUrl) URL.revokeObjectURL(lastWavUrl);
+    lastWavUrl = URL.createObjectURL(encodeWav(ab));
+    const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
+    dl.href = lastWavUrl; dl.download = `pitch-resample-${stamp}.wav`;
+    dl.classList.remove('hidden');
+  }
+
+  function encodeWav(buf) {
+    const nCh = buf.numberOfChannels, len = buf.length, sr = buf.sampleRate;
+    const dataBytes = len * nCh * 2;
+    const ab = new ArrayBuffer(44 + dataBytes);
+    const v = new DataView(ab);
+    const wr = (o, s) => { for (let i = 0; i < s.length; i++) v.setUint8(o + i, s.charCodeAt(i)); };
+    wr(0, 'RIFF'); v.setUint32(4, 36 + dataBytes, true); wr(8, 'WAVE');
+    wr(12, 'fmt '); v.setUint32(16, 16, true); v.setUint16(20, 1, true);
+    v.setUint16(22, nCh, true); v.setUint32(24, sr, true);
+    v.setUint32(28, sr * nCh * 2, true); v.setUint16(32, nCh * 2, true); v.setUint16(34, 16, true);
+    wr(36, 'data'); v.setUint32(40, dataBytes, true);
+    const chans = [];
+    for (let c = 0; c < nCh; c++) chans.push(buf.getChannelData(c));
+    let o = 44;
+    for (let i = 0; i < len; i++) for (let c = 0; c < nCh; c++) {
+      const s = Math.max(-1, Math.min(1, chans[c][i]));
+      v.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7FFF, true); o += 2;
+    }
+    return new Blob([ab], { type: 'audio/wav' });
+  }
+
+
+  recBtn.addEventListener('click', () => { recorder ? stopRec() : startRec(false); });   // manual take, up to 30 s
+
+  function removeGalaxy(g) {
+    if (g.kind !== 'sample') return;
+    if (g.engine) {
+      const e = g.engine;
+      e.out.gain.rampTo(0, 0.4);
+      setTimeout(() => disposeEngine(e), 600);
+      if (session) delete session.engines['s' + g.id];
+      g.engine = null;
+    }
+    galaxies.splice(galaxies.indexOf(g), 1);
+  }
+
+  // =====================================================================
+  //  INPUT: drag to travel, tap your core to play, tap a galaxy to fly to it, scroll to set levels
+  // =====================================================================
+  const cv = $('sky'), ctx = cv.getContext('2d');
+  let W = 0, H = 0, DPR = 1, bgGrad = null;
+  function resize() {
+    DPR = Math.min(LITE ? 1.25 : 2, window.devicePixelRatio || 1);
+    W = window.innerWidth; H = window.innerHeight;
+    cv.width = W * DPR; cv.height = H * DPR;
+    ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    bgGrad = ctx.createRadialGradient(W / 2, H * 0.62, 0, W / 2, H * 0.62, Math.max(W, H) * 0.85);   // built once per size
+    bgGrad.addColorStop(0, '#1d1e1f'); bgGrad.addColorStop(0.45, '#181a1b'); bgGrad.addColorStop(1, '#121314');
+    SPACE.range = Math.max(W, H) * SPACE.rangeK;                      // maxDistance follows the window
+    galaxies.forEach(g => { g.range = SPACE.range; });
+  }
+  window.addEventListener('resize', resize); resize();
+
+  const toScreen = (x, y) => [x - C.x + W / 2, y - C.y + H / 2];
+  const gScreen = g => [wrapD(g.x - C.x) + W / 2, wrapD(g.y - C.y) + H / 2];   // nearest copy of an orb on the torus
+  const toWorld = (sx, sy) => [sx + C.x - W / 2, sy + C.y - H / 2];
+  const coreScreen = () => toScreen(P.x, P.y);
+  function galaxyAt(sx, sy) {
+    let best = null, bd = Infinity;
+    for (const g of galaxies) {
+      if (!roaming(g)) continue;
+      const [gx, gy] = gScreen(g);
+      const d = Math.hypot(gx - sx, gy - sy);
+      if (d < Math.max(26, g.planet ? g.r * 1.1 : g.r * 1.7) && d < bd) { bd = d; best = g; }
+    }
+    return best;
+  }
+  const onCore = (sx, sy) => { const [cx, cy] = coreScreen(); return Math.hypot(sx - cx, sy - cy) < 56; };
+
+  let hintGone = false;
+  function hideHint() { if (!hintGone) { hintGone = true; hint.classList.add('gone'); } }
+  setTimeout(() => { if (running) hideHint(); }, 12000);
+
+  let down = null, hover = null;
+  cv.addEventListener('pointerdown', e => {
+    if (e.button === 2) return;
+    wakeAudio();
+    if (down) { down.multi = true; return; }                            // a second finger: that's a gesture, not a drag
+    cv.setPointerCapture(e.pointerId);
+    const [cx, cy] = coreScreen();
+    const orb = onCore(e.clientX, e.clientY) ? null : galaxyAt(e.clientX, e.clientY);
+    const what = onCore(e.clientX, e.clientY) ? 'core' : (orb ? 'orb' : 'space');
+    down = { x: e.clientX, y: e.clientY, lx: e.clientX, ly: e.clientY, lt: performance.now(), moved: false, what, orb,
+             offX: cx - e.clientX, offY: cy - e.clientY, lvl0: orb ? orb.level : 0 };
+    glide = null;
+    if (what === 'core') {
+      const mine = down;
+      mine.hold = setTimeout(() => { if (down === mine && !mine.moved && running) { mine.held = true; stop(); } }, 700);
+    }
+  });
+  cv.addEventListener('pointermove', e => {
+    if (!down) {
+      hover = galaxyAt(e.clientX, e.clientY);
+      cv.classList.toggle('pointing', !!hover || onCore(e.clientX, e.clientY));
+      return;
+    }
+    if (down.multi) return;
+    const dx = e.clientX - down.lx, dy = e.clientY - down.ly, now = performance.now();
+    if (!down.moved && Math.hypot(e.clientX - down.x, e.clientY - down.y) > 6) { down.moved = true; cv.classList.add('grabbing'); hideHint(); }
+    if (down.moved) {
+      if (down.what === 'orb') {
+        // touch a stone and slide up / down: its level
+        down.orb.level = clamp(down.lvl0 - (e.clientY - down.y) / 220, 0, 1);
+        down.orb.showUntil = now + 1400;
+      } else {
+        // the core follows your finger: grabbed directly, or pushed from anywhere in the water
+        if (down.what === 'core') { const [wx, wy] = toWorld(e.clientX + down.offX, e.clientY + down.offY); P.x = wx; P.y = wy; }
+        else { P.x += dx; P.y += dy; }
+        const dtm = Math.max(8, now - down.lt) / 1000;
+        vel.x += (dx / dtm - vel.x) * 0.45; vel.y += (dy / dtm - vel.y) * 0.45;
+      }
+    }
+    down.lx = e.clientX; down.ly = e.clientY; down.lt = now;
+  });
+  const endDrag = e => {
+    if (!down) return;
+    clearTimeout(down.hold);
+    if (down.held || down.multi) { down = null; cv.classList.remove('grabbing'); return; }
+    if (!down.moved) {
+      vel.x = vel.y = 0;
+      if (down.what === 'core') {
+        // tap: enter the water · tap while sounding: capture a fossil · hold: leave
+        if (!running) togglePlay();
+        else if (recorder) stopRec();
+        else startRec(true);
+      } else if (down.what === 'orb') {
+        const g = down.orb;                                             // drift toward it, stopping beside it
+        const dx = -relX(g), dy = -relY(g), d = Math.hypot(dx, dy) || 1, stopAt = g.r * (g.planet ? 1.6 : 2) + 40;
+        glide = { x: P.x - dx + dx / d * stopAt, y: P.y - dy + dy / d * stopAt };
+      } else {
+        const [wx, wy] = toWorld(e.clientX, e.clientY);                 // tap the water: drift there
+        glide = { x: wx, y: wy };
+      }
+    } else if (performance.now() - down.lt > 90 || down.what === 'orb') { vel.x = vel.y = 0; }
+    down = null; cv.classList.remove('grabbing');
+  };
+  cv.addEventListener('pointerup', endDrag);
+  cv.addEventListener('pointercancel', endDrag);
+  cv.addEventListener('contextmenu', e => {
+    e.preventDefault();
+    const g = galaxyAt(e.clientX, e.clientY);
+    if (g && g.kind === 'sample') removeGalaxy(g);
+  });
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    const g = galaxyAt(e.clientX, e.clientY);
+    if (g) { g.level = clamp(g.level - e.deltaY * 0.0012, 0, 1); g.showUntil = performance.now() + 1600; return; }
+    const [cx, cy] = coreScreen();
+    if (Math.hypot(e.clientX - cx, e.clientY - cy) < 110) { blendOffset = clamp(blendOffset - e.deltaY * 0.06, -60, 60); coreShowUntil = performance.now() + 1600; return; }
+    if (e.deltaY > 0) { earthPullUntil = performance.now() + 700; hideHint(); }   // scroll down: return to Earth
+  }, { passive: false });
+  // two fingers swiping down on a phone: return to Earth
+  let twoY = null;
+  cv.addEventListener('touchmove', e => {
+    if (e.touches.length !== 2) { twoY = null; return; }
+    const y = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+    if (twoY == null) twoY = y;
+    else if (y - twoY > 40) { earthPullUntil = performance.now() + 900; twoY = y; hideHint(); }
+  }, { passive: true });
+  cv.addEventListener('touchend', () => { twoY = null; }, { passive: true });
+
+  const keys = new Set();
+  window.addEventListener('keydown', e => {
+    if (e.target && e.target.tagName === 'INPUT') return;
+    const k = e.key.toLowerCase();
+    if (k === ' ') { e.preventDefault(); togglePlay(); return; }
+    if (k === 'c' && !e.repeat) { resetPositions(); return; }        // drift back to where you started
+    if (k === 'r' && !e.repeat) { recorder ? stopRec() : startRec(true); return; }
+    if (['arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'w', 'a', 's', 'd'].includes(k)) { e.preventDefault(); keys.add(k); glide = null; hideHint(); }
+  });
+  window.addEventListener('keyup', e => keys.delete(e.key.toLowerCase()));
+  window.addEventListener('blur', () => keys.clear());
+
+  // =====================================================================
+  //  WEB MIDI (silent: no UI)
+  //  CC 1 / 74 move the core left-right, CC 2 / 71 up-down (centre = home).
+  //  Notes ring the nearest orb with a soft bell, snapped to the room's scale once it is decided.
+  // =====================================================================
+  let midiReady = false;
+  const midiHeld = new Map(), midiPos = { x: 0, y: 0 };
+  function initMidi() {
+    if (midiReady || !navigator.requestMIDIAccess) return;
+    midiReady = true;
+    navigator.requestMIDIAccess().then(acc => {
+      const hook = inp => { inp.onmidimessage = onMidi; };
+      acc.inputs.forEach(hook);
+      acc.onstatechange = ev => { if (ev.port && ev.port.type === 'input' && ev.port.state === 'connected') hook(ev.port); };
+    }).catch(() => {});
+  }
+  function snapToScale(note) {
+    const sc = session && session.scale && session.scale.locked ? session.scale.current : null;
+    if (!sc) return note;
+    let best = note, bd = 99;
+    for (let o = -12; o <= 12; o++) {
+      const pc = ((note + o) % 12 + 12) % 12;
+      if (sc.degrees.some(d => (sc.pc + d) % 12 === pc) && Math.abs(o) < bd) { bd = Math.abs(o); best = note + o; }
+    }
+    return best;
+  }
+  function nearestVoiced() {
+    let best = null, bd = Infinity;
+    for (const g of galaxies) {
+      if (!g.engine || g.earth) continue;
+      const d = Math.hypot(relX(g), relY(g));
+      if (d < bd) { bd = d; best = g; }
+    }
+    return best;
+  }
+  function onMidi(m) {
+    const [st, d1, d2] = m.data, type = st & 0xf0;
+    if (type === 0xB0) {
+      const v = (d2 - 64) / 64;
+      if (d1 === 1 || d1 === 74) midiPos.x = v; else if (d1 === 2 || d1 === 71) midiPos.y = v; else return;
+      glide = { x: P.x + wrapD(midiPos.x * SPACE.place * 1.6 - P.x), y: P.y + wrapD(midiPos.y * SPACE.place * 1.6 - P.y) };
+      hideHint();
+      return;
+    }
+    if (!session || !running) return;
+    if (type === 0x90 && d2 > 0) {
+      const g = nearestVoiced(); if (!g) return;
+      const e = g.engine;
+      if (!e.pluck) {
+        e.pluck = new Tone.PolySynth(Tone.Synth, { maxPolyphony: LITE ? 4 : 8, volume: -12,
+          oscillator: { type: 'sine' }, envelope: { attack: 0.04, decay: 0.4, sustain: 0.25, release: 2.8 } });
+        e.pluck.connect(e.out);
+      }
+      const f = Tone.Frequency(snapToScale(d1), 'midi').toFrequency();
+      e.pluck.triggerAttack(f, Tone.now(), 0.2 + 0.8 * d2 / 127);
+      midiHeld.set(d1, { e, f });
+      g.glow = Math.min(1, g.glow + 0.4 * d2 / 127);
+    } else if (type === 0x80 || (type === 0x90 && d2 === 0)) {
+      const h = midiHeld.get(d1); if (!h) return;
+      midiHeld.delete(d1);
+      try { h.e.pluck.triggerRelease(h.f, Tone.now()); } catch (err) {}
+    }
+  }
+
+  // =====================================================================
+  //  BACKGROUND: when the page is hidden only the drawing stops (that is what costs battery);
+  //  the sound keeps playing. If the browser suspended audio anyway, it comes back on return or on the next touch.
+  // =====================================================================
+  let rafId = 0;
+  function wakeAudio() {
+    if (!built || document.hidden) return;
+    const raw = Tone.getContext().rawContext;
+    if (raw.state === 'suspended') raw.resume().then(() => { if (running) fade.gain.rampTo(1, 1.5); }).catch(() => {});
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      cancelAnimationFrame(rafId); rafId = 0;
+    } else {
+      last = performance.now(); lastDraw = 0;
+      if (!rafId) rafId = requestAnimationFrame(frame);
+      wakeAudio();
+      if (bgAudio && running && bgAudio.paused) bgAudio.play().catch(() => {});
+    }
+  });
+
+  // =====================================================================
+  //  DRAWING
+  // =====================================================================
+  const SUN = [226, 157, 98], INK = [244, 241, 234], REC = [196, 106, 95];
+  // steam: soft warm wisps rising slowly in front of the distant water
+  const STEAM = [];
+  for (let i = 0; i < (LITE ? 8 : 18); i++) STEAM.push({ x: Math.random(), y: Math.random(), r: rand(120, 320), sp: rand(4, 11), sw: rand(0, TAU), a: rand(0.022, 0.05), z: rand(0.04, 0.16) });
+  // water rings: each strong breath of the microphone drops a ripple from your core
+  const RINGS = []; let ringCool = 0;
+  const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+  // Light is pre-rendered once into small sprites and stamped with drawImage + globalAlpha.
+  // Creating radial gradients every frame was the main reason phones ran hot.
+  function makeSprite(paint) {
+    const c = document.createElement('canvas'); c.width = c.height = 256;
+    paint(c.getContext('2d')); return c;
+  }
+  const glow = (rgb, mid) => makeSprite(x => {
+    const g = x.createRadialGradient(128, 128, 0, 128, 128, 128);
+    g.addColorStop(0, rgba(rgb, 1)); g.addColorStop(0.45, rgba(rgb, mid)); g.addColorStop(1, rgba(rgb, 0));
+    x.fillStyle = g; x.fillRect(0, 0, 256, 256);
+  });
+  const SPR = {
+    amber: glow([226, 157, 98], 0.35),
+    ember: glow([250, 205, 150], 0.3),
+    pearl: glow([244, 241, 234], 0.3),
+    steam: glow([244, 241, 234], 0.45),
+    stone: makeSprite(x => {                                           // the stone: lit from inside, no hard rim
+      const k = 128 / 1.08, g = x.createRadialGradient(128 - 0.18 * k, 128 - 0.22 * k, 0, 128, 128, 128);
+      g.addColorStop(0, 'rgba(240,186,132,0.95)'); g.addColorStop(0.45, 'rgba(226,157,98,0.8)');
+      g.addColorStop(0.8, 'rgba(212,140,83,0.34)'); g.addColorStop(1, 'rgba(212,140,83,0)');
+      x.fillStyle = g; x.fillRect(0, 0, 256, 256);
+    }),
+    core: makeSprite(x => {                                            // pearl vapour core
+      const k = 128 / 1.25, g = x.createRadialGradient(128 - 0.2 * k, 128 - 0.25 * k, 0, 128, 128, 128);
+      g.addColorStop(0, 'rgba(244,241,234,0.99)'); g.addColorStop(0.5, 'rgba(244,241,234,0.75)');
+      g.addColorStop(0.82, 'rgba(244,241,234,0.25)'); g.addColorStop(1, 'rgba(244,241,234,0)');
+      x.fillStyle = g; x.fillRect(0, 0, 256, 256);
+    })
+  };
+  function stamp(spr, x, y, r, a) {
+    if (!(a > 0.003) || r < 0.5) return;
+    ctx.globalAlpha = Math.min(1, a);
+    ctx.drawImage(spr, x - r, y - r, r * 2, r * 2);
+    ctx.globalAlpha = 1;
+  }
+
+  const STARS = [];
+  for (let i = 0; i < (LITE ? 110 : 260); i++) STARS.push({ x: Math.random() * 1600, y: Math.random() * 1600, z: rand(0.08, 0.45), a: rand(0.08, 0.4), s: Math.random() < 0.1 ? 1.4 : 0.8 });
+
+  const youParts = [];
+  for (let i = 0; i < (LITE ? 90 : 170); i++) youParts.push({ a: rand(0, TAU), u: Math.pow(Math.random(), 0.8), ch: pick(GLYPHS), al: rand(0.15, 0.6), sp: rand(0.6, 1.4) });
+
+  const NW = 96, ripple = new Float32Array(NW), rtmp = new Float32Array(NW), segs = new Float32Array(NW);
+  let lvl = 0, peakSeen = 0.02, coreShowUntil = 0, last = performance.now();
+
+  function ellipsePoint(cx, cy, rad, flat, tilt, a) {
+    const ex = Math.cos(a) * rad, ey = Math.sin(a) * rad * flat;
+    const c = Math.cos(tilt), s = Math.sin(tilt);
+    return [cx + ex * c - ey * s, cy + ex * s + ey * c];
+  }
+
+  function drawGalaxy(g, tt, dt, now) {
+    const [sx, sy] = gScreen(g);
+    const reach = g.r * 5;
+    if (sx < -reach || sx > W + reach || sy < -reach || sy > H + reach) return false;
+    if (g.earth) {
+      const k = GEO.level, a = 0.05 + 0.05 * Math.sin(tt * (0.9 + 2 * k)) + 0.25 * k;
+      ctx.strokeStyle = rgba(k > 0.4 ? SUN : INK, a); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.ellipse(sx, sy, 70 + 20 * k, (70 + 20 * k) * 0.62, -0.35, 0, TAU); ctx.stroke();
+      if (k > 0.3) stamp(SPR.amber, sx, sy, 120, 0.12 * k);           // an active field warms the water around home
+      return true;
+    }
+    const infl = g.infl, born = clamp((now - g.born) / 1600, 0, 1), bornE = smooth(born);
+    g.act += ((running ? infl * (0.35 + feat.level) : 0) - g.act) * 0.08;
+    const dim = g.dust ? 0.35 : 1;
+    // gentle tug toward you when you're close
+    const [ccx, ccy] = coreScreen();
+    const tx = ccx - sx, ty = ccy - sy, td = Math.hypot(tx, ty) || 1;
+    const tug = infl * 0.22;
+
+    ctx.lineWidth = 1;
+    for (const ob of g.orbits) {
+      ctx.strokeStyle = rgba(INK, (0.05 + 0.08 * infl) * dim * bornE);
+      ctx.beginPath(); ctx.ellipse(sx, sy, ob.rad * bornE, ob.rad * ob.flat * bornE, ob.tilt, 0, TAU); ctx.stroke();
+    }
+    const spin = g.spin * (1 + infl * 1.6 + g.act * 2);
+    ctx.font = '9px ui-monospace, Menlo, monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (const p of g.parts) {
+      p.a += dt * 0.08 * Math.sqrt((g.r * 1.2) / p.rad) * spin;
+      const pull = tug * (p.rad / (g.r * 4.8));
+      let [x, y] = ellipsePoint(sx, sy, p.rad * bornE, g.flat, g.tilt, p.a);
+      x += tx / td * pull * p.rad; y += ty / td * pull * p.rad;
+      const flick = 0.75 + 0.25 * Math.sin(tt * 2 + p.wob);
+      ctx.fillStyle = rgba(INK, p.al * (0.45 + 0.6 * infl + g.act * 0.6) * flick * dim * bornE);
+      ctx.fillText(p.ch, x, y);
+    }
+    for (const st of g.sats) {
+      st.a += dt * st.sp * (1 + infl);
+      const [x, y] = ellipsePoint(sx, sy, st.ob.rad * bornE, st.ob.flat, st.ob.tilt, st.a);
+      ctx.fillStyle = rgba(SUN, (0.75 + 0.25 * infl) * dim);
+      ctx.beginPath(); ctx.arc(x, y, st.s * bornE, 0, TAU); ctx.fill();
+    }
+    const sounding = running ? infl * g.level * (0.45 + 0.55 * Math.min(1, feat.energy * 2.5)) : 0;
+    g.breath += dt * (0.5 + 0.45 * sounding);
+    const br = Math.sin(g.breath * TAU * 0.22);                         // a slow breath
+    const cr = (g.planet ? g.r : g.r * (0.55 + 0.45 * (g.dust ? 1 : g.level))) * bornE;
+    if (g.planet) {
+      g.glow += (Math.max(infl, sounding) - g.glow) * Math.min(1, dt * 1.5);
+      const heat = g.glow, life = 0.55 + 0.45 * g.level;
+      // wide diffusion halo: the hot stone warming the water around it (warmer and wider, never bigger)
+      stamp(SPR.amber, sx, sy, cr * (2.2 + 1.6 * heat + 0.15 * br), (0.10 + 0.26 * heat) * life);
+      // the stone itself: 80 % at its heart, fading to nothing at the rim; heat glows up from inside
+      stamp(SPR.stone, sx, sy, cr * 1.08, (0.55 + 0.45 * life) * (0.9 + 0.1 * heat));
+      stamp(SPR.ember, sx - cr * 0.18, sy - cr * 0.22, cr * 0.8, 0.3 * heat + 0.04 * (1 + br));
+    } else {
+    if (cr > 3) stamp(SPR.amber, sx, sy, cr * 3.2, (0.12 + 0.18 * infl) * dim);
+    ctx.fillStyle = rgba(SUN, (g.dust ? 0.35 : 0.85));
+    ctx.beginPath(); ctx.arc(sx, sy, Math.max(1.5, cr), 0, TAU); ctx.fill();
+    }
+    if (g.kind === 'sample') {
+      ctx.strokeStyle = rgba(SUN, 0.6); ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(sx, sy, cr + 6, 0, TAU); ctx.stroke();
+    }
+    // inner arc line (like a meridian), turns slowly
+    if (!g.dust && !g.planet && cr > 10) {
+      ctx.strokeStyle = 'rgba(0,0,0,0.18)'; ctx.lineWidth = 1;
+      ctx.beginPath(); ctx.arc(sx - cr * 0.15, sy + cr * 0.1, cr * 0.85, -1.9 + tt * 0.05, -0.2 + tt * 0.05); ctx.stroke();
+    }
+    if (!g.dust) {
+      ctx.font = '300 9px ui-sans-serif, system-ui, sans-serif';
+      ctx.fillStyle = rgba(INK, 0.22 + 0.5 * infl + (g === hover ? 0.3 : 0));
+      ctx.fillText(spaced(g.label), sx, sy + cr + 18);
+      if (g === hover || now < g.showUntil) {
+        ctx.strokeStyle = rgba(INK, 0.6); ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.arc(sx, sy, cr + 12, -Math.PI / 2, -Math.PI / 2 + TAU * g.level); ctx.stroke();
+        ctx.fillStyle = rgba(INK, 0.6);
+        ctx.fillText(Math.round(g.level * 100) + '', sx, sy - cr - 22);
+      }
+    }
+    return true;
+  }
+  const spacedCache = {};
+  const spaced = s => spacedCache[s] || (spacedCache[s] = s.toUpperCase().split('').join('\u200A'));
+
+  function drawLinks(tt) {
+    for (const g of galaxies) {
+      if (!roaming(g) || g.infl < 0.02) continue;
+      const [sx, sy] = gScreen(g);
+      const [cx, cy] = coreScreen();
+      const a = g.infl * (running ? 1 : 0.4);
+      ctx.strokeStyle = rgba(INK, 0.08 * a); ctx.lineWidth = 1;
+      ctx.setLineDash([2, 6]);
+      ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(sx, sy); ctx.stroke();
+      ctx.setLineDash([]);
+      if (!running) continue;
+      const n = 5, speed = 0.05 + feat.level * 0.18;
+      for (let i = 0; i < n; i++) {                                     // your sound travelling to them
+        const t = (tt * speed + i / n) % 1;
+        const x = cx + (sx - cx) * t, y = cy + (sy - cy) * t;
+        ctx.fillStyle = rgba(INK, 0.5 * a * Math.sin(t * Math.PI));
+        ctx.beginPath(); ctx.arc(x, y, 1.2, 0, TAU); ctx.fill();
+      }
+    }
+  }
+
+  function drawBridge(tt) {
+    const v = BRIDGE.v;
+    if (v < 0.01 || !BRIDGE.a) return;
+    const [ax, ay] = gScreen(BRIDGE.a), [bx, by] = gScreen(BRIDGE.b);
+    const [cx, cy] = coreScreen(), a = v * (running ? 1 : 0.4);
+    // a soft arc of light through you, joining both pools
+    ctx.strokeStyle = rgba(SUN, 0.18 * a); ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(ax, ay); ctx.quadraticCurveTo(2 * cx - (ax + bx) / 2, 2 * cy - (ay + by) / 2, bx, by); ctx.stroke();
+    ctx.font = '9px ui-monospace, Menlo, monospace'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    const qx = 2 * cx - (ax + bx) / 2, qy = 2 * cy - (ay + by) / 2;
+    for (let i = 0; i < 26; i++) {
+      const t = (i / 26 + tt * 0.03) % 1, u = 1 - t;
+      const x = u * u * ax + 2 * u * t * qx + t * t * bx, y = u * u * ay + 2 * u * t * qy + t * t * by;
+      ctx.fillStyle = rgba(INK, 0.45 * a * Math.sin(t * Math.PI) * (0.6 + 0.4 * Math.sin(tt * 1.3 + i)));
+      ctx.fillText(i % 3 ? '·' : '+', x, y + Math.sin(tt * 0.8 + i * 0.7) * 3);
+    }
+    stamp(SPR.amber, cx, cy, 140, 0.08 * a);
+  }
+
+  function drawEdgeMarks() {
+    const m = 18;
+    for (const g of galaxies) {
+      if (!audible(g)) continue;
+      const [sx, sy] = gScreen(g);
+      if (sx > -g.r && sx < W + g.r && sy > -g.r && sy < H + g.r) continue;
+      const dx = sx - W / 2, dy = sy - H / 2;
+      const k = Math.min((W / 2 - m) / Math.abs(dx || 1e-6), (H / 2 - m) / Math.abs(dy || 1e-6));
+      const ex = W / 2 + dx * k, ey = H / 2 + dy * k;
+      const d = Math.hypot(relX(g), relY(g));
+      ctx.fillStyle = rgba(g.earth ? INK : SUN, 0.35 + 0.4 * clamp(1 - d / 2500, 0, 1));
+      ctx.beginPath(); ctx.arc(ex, ey, 1.5 + 2.5 * clamp(1 - d / 2500, 0, 1), 0, TAU); ctx.fill();
+    }
+  }
+
+  function drawYou(tt, dt, now) {
+    const [cx, cy] = coreScreen();
+    const active = built && session && fade.gain.value > 0.01;
+    let rms = 0;
+    segs.fill(0);
+    if (active) {
+      const data = session.input.wave.getValue();
+      let sum = 0;
+      for (let i = 0; i < data.length; i++) sum += data[i] * data[i];
+      rms = Math.sqrt(sum / data.length);
+      const per = Math.max(1, Math.floor(data.length / NW));
+      let mx = 0, mean = 0;
+      for (let k = 0; k < NW; k++) {
+        let s = 0; for (let i = k * per; i < (k + 1) * per && i < data.length; i++) s += data[i] * data[i];
+        segs[k] = Math.sqrt(s / per); mean += segs[k]; if (segs[k] > mx) mx = segs[k];
+      }
+      mean /= NW;
+      for (let k = 0; k < NW; k++) segs[k] -= mean;
+      peakSeen = Math.max(0.01, mx - mean, peakSeen * 0.998);
+    }
+    const tl = Math.min(1, Math.sqrt(rms) * 2.6);
+    lvl += (tl - lvl) * (tl > lvl ? 0.12 : 0.03);
+
+    // glyph disk: earth = tight and close, cloud = wide and scattered
+    const spread = 18 + blendVal * 1.25;
+    const on = running ? 1 : 0.35;
+    ctx.font = '9px ui-monospace, Menlo, monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (const p of youParts) {
+      p.a += dt * 0.12 * p.sp * (1 + lvl * 1.8);
+      const rad = 40 + p.u * spread + lvl * 14 * Math.sin(p.a * 3 + tt);
+      const [x, y] = ellipsePoint(cx, cy, rad, 0.62, -0.35, p.a);
+      ctx.fillStyle = rgba(INK, p.al * on * (0.5 + lvl));
+      ctx.fillText(p.ch, x, y);
+    }
+
+    // ripple ring that follows the microphone
+    const drift = Math.floor(tt * 2.5);
+    const soft = (x, L) => L * Math.tanh(x / L);
+    for (let k = 0; k < NW; k++) {
+      const th = (k / NW) * TAU;
+      const mod = 1 + 0.28 * Math.sin(3 * th + 0.31 * tt + 1.1) + 0.22 * Math.sin(5 * th - 0.23 * tt + 0.4);
+      const tgt = active ? clamp(segs[(k + drift) % NW] / peakSeen, -1, 1) * (3 + 16 * lvl) * mod + 4 * lvl : 0;
+      const idle = 1.2 * Math.sin(2 * th + 0.5 * tt) + 0.8 * Math.sin(3 * th - 0.37 * tt + 1) + 0.5 * Math.sin(5 * th + 0.23 * tt + 2);
+      ripple[k] += (soft(tgt + idle, 16) - ripple[k]) * 0.07;
+    }
+    for (let pass = 0; pass < 3; pass++) {
+      for (let k = 0; k < NW; k++) rtmp[k] = 0.25 * ripple[(k + NW - 1) % NW] + 0.5 * ripple[k] + 0.25 * ripple[(k + 1) % NW];
+      ripple.set(rtmp);
+    }
+    ctx.strokeStyle = rgba(INK, 0.22 + 0.4 * lvl); ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    for (let k = 0; k <= NW; k++) {
+      const a = ((k % NW) / NW) * TAU - Math.PI / 2, r = 34 + ripple[k % NW];
+      const x = cx + Math.cos(a) * r, y = cy + Math.sin(a) * r;
+      k ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+    ctx.stroke();
+
+    // water rings
+    ringCool -= dt;
+    if (running && lvl > 0.22 && ringCool <= 0) { RINGS.push({ r: 24, a: 0.2 * Math.min(1, lvl * 1.6) }); ringCool = 1.1; }
+    if (!running && RINGS.length === 0 && Math.random() < dt * 0.15) RINGS.push({ r: 24, a: 0.08 });
+    for (let i = RINGS.length - 1; i >= 0; i--) {
+      const rg = RINGS[i]; rg.r += dt * 28; rg.a *= Math.pow(0.55, dt);
+      if (rg.a < 0.004) { RINGS.splice(i, 1); continue; }
+      for (const [w, f] of [[5, 0.25], [2.4, 0.5], [1, 1]]) {           // each ring drawn soft, like a drop on calm water
+        ctx.strokeStyle = rgba(INK, rg.a * f); ctx.lineWidth = w;
+        ctx.beginPath(); ctx.ellipse(cx, cy, rg.r, rg.r * 0.62, -0.35, 0, TAU); ctx.stroke();
+      }
+    }
+    // the core: hollow while silent, full while playing
+    const cr = 17 + lvl * 9;
+    stamp(SPR.pearl, cx, cy, cr * 4, running ? 0.14 + 0.15 * lvl : 0.05);
+    // pearl vapour: no hard edge, bright at the heart, dissolving into the air
+    const wake = running ? 1 : 0.45;
+    stamp(SPR.core, cx, cy, cr * 1.25, (busy ? 0.55 : 1) * wake + 0.04);
+    for (let i = 0; i < 3; i++) {                                         // threads of vapour rising from it
+      const ph = tt * 0.35 + i * 2.1, h = 28 + 16 * lvl;
+      ctx.strokeStyle = rgba(INK, (0.06 + 0.12 * lvl) * (0.6 + 0.4 * Math.sin(ph)) * (0.5 + wake));
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      const x0 = cx + (i - 1) * cr * 0.45;
+      ctx.moveTo(x0, cy - cr * 0.8);
+      for (let k = 1; k <= 12; k++) { const u = k / 12; ctx.lineTo(x0 + Math.sin(ph * 1.7 + u * 5 + i) * 6 * u, cy - cr * 0.8 - u * h); }
+      ctx.stroke();
+    }
+    if (recorder) {
+      const pr = 0.5 + 0.5 * Math.sin(now / 220);
+      ctx.strokeStyle = rgba(REC, 0.45 + 0.4 * pr); ctx.lineWidth = 1.2;
+      const prog = clamp((Date.now() - recStartTs) / 1000 / recLimit, 0, 1);
+      ctx.beginPath(); ctx.arc(cx, cy, 56 + spread * 0.15, -Math.PI / 2, -Math.PI / 2 + TAU * prog); ctx.stroke();
+    }
+    if (now < coreShowUntil) {
+      ctx.font = '300 9px ui-sans-serif, system-ui, sans-serif';
+      ctx.fillStyle = rgba(INK, 0.6);
+      ctx.fillText(blendVal <= 5 ? 'EARTH' : blendVal >= 95 ? 'CLOUD' : spaced('earth ' + (100 - blendVal) + ' · cloud ' + blendVal), cx, cy - 78);
+    }
+  }
+
+  const FRAME_MS = MOBILE ? 1000 / 24 : LITE ? 1000 / 32 : 0;   // phones 24 fps, Safari 32 fps: the CPU goes to the audio thread
+  let lastDraw = 0, earthPull = 0, earthPullUntil = 0;
+  const bgOff = { x: 0, y: 0 };                   // keeps the star field continuous when the torus wraps you around
+  function shiftWorld(dx, dy) {
+    P.x += dx; P.y += dy; C.x += dx; C.y += dy; bgOff.x -= dx; bgOff.y -= dy;
+    if (glide) { glide.x += dx; glide.y += dy; }
+  }
+  function frame(now) {
+    rafId = requestAnimationFrame(frame);
+    if (FRAME_MS && now - lastDraw < FRAME_MS - 1) return;
+    lastDraw = now;
+    const dt = Math.min(0.05, (now - last) / 1000); last = now;
+    const tt = now / 1000;
+
+    // travel
+    let ax = 0, ay = 0;
+    if (keys.has('arrowleft') || keys.has('a')) ax -= 1;
+    if (keys.has('arrowright') || keys.has('d')) ax += 1;
+    if (keys.has('arrowup') || keys.has('w')) ay -= 1;
+    if (keys.has('arrowdown') || keys.has('s')) ay += 1;
+    vel.x += ax * SPACE.moveAccel * dt; vel.y += ay * SPACE.moveAccel * dt;
+    if (glide) {
+      const k = Math.min(1, dt * 1.1);
+      P.x += (glide.x - P.x) * k; P.y += (glide.y - P.y) * k;
+      if (Math.hypot(glide.x - P.x, glide.y - P.y) < 0.5) glide = null;
+    } else if (!(down && down.moved && down.what !== 'orb')) {
+      P.x += vel.x * dt; P.y += vel.y * dt;
+      const fr = Math.pow(0.12, dt);
+      vel.x *= fr; vel.y *= fr;
+    }
+
+    // return to Earth: a steady gravitational pull toward (0, 0)
+    earthPull += ((now < earthPullUntil ? 1 : 0) - earthPull) * Math.min(1, dt * 2);
+    if (earthPull > 0.01 && !(down && down.moved)) {
+      glide = null;
+      const k = Math.min(1, dt * 0.9 * earthPull);
+      P.x -= wrapD(P.x) * k; P.y -= wrapD(P.y) * k;
+      vel.x *= 1 - k; vel.y *= 1 - k;
+    }
+    // sanity: never let a broken number into the audio graph
+    if (!isFinite(P.x) || !isFinite(P.y) || !isFinite(C.x) || !isFinite(C.y)) {
+      P.x = P.y = C.x = C.y = 0; vel.x = vel.y = 0; glide = null;
+    }
+    // torus: leaving one edge brings you in from the other, seamlessly
+    const HALF = SPACE.world / 2;
+    if (P.x > HALF) shiftWorld(-SPACE.world, 0); else if (P.x < -HALF) shiftWorld(SPACE.world, 0);
+    if (P.y > HALF) shiftWorld(0, -SPACE.world); else if (P.y < -HALF) shiftWorld(0, SPACE.world);
+
+    { // the camera follows softly, and faster the further the core gets ahead, so the core never leaves the screen
+      const lag = Math.hypot(P.x - C.x, P.y - C.y), k = Math.min(1, dt * (1.4 + lag / 120));
+      C.x += (P.x - C.x) * k; C.y += (P.y - C.y) * k;
+      const mx = W * 0.38, my = H * 0.38;
+      C.x = clamp(C.x, P.x - mx, P.x + mx); C.y = clamp(C.y, P.y - my, P.y + my);
+    }
+    for (const g of galaxies) {
+      const d = Math.hypot(relX(g), relY(g));
+      g.infl = audible(g) ? smooth(clamp(1 - d / g.range, 0, 1)) : 0;
+    }
+    if (!session) findBridge();
+
+    ctx.fillStyle = bgGrad;
+    ctx.fillRect(0, 0, W, H);
+    const bx = C.x + bgOff.x, by = C.y + bgOff.y;
+    for (const st of STEAM) {
+      st.y -= dt * st.sp / H; if (st.y < -0.4) { st.y = 1.3; st.x = Math.random(); }
+      const x = (((st.x * W - bx * st.z) % (W + 600)) + W + 600) % (W + 600) - 300 + Math.sin(tt * 0.07 + st.sw) * 40;
+      const y = (((st.y * H - by * st.z * 0.3) % (H + 600)) + H + 600) % (H + 600) - 300;
+      stamp(SPR.steam, x, y, st.r, st.a);
+    }
+
+    // parallax stars give a sense of motion
+    const S = 1600;
+    for (const s of STARS) {
+      let x = ((s.x - bx * s.z) % S + S) % S, y = ((s.y - by * s.z - tt * 6 * s.z) % S + S) % S;
+      ctx.fillStyle = rgba(INK, s.a * 0.6);
+      for (let ox = x - S; ox < W; ox += S) {
+        if (ox < -2) continue;
+        for (let oy = y - S; oy < H; oy += S) { if (oy < -2) continue; ctx.fillRect(ox, oy, s.s, s.s); }
+      }
+    }
+
+    drawLinks(tt);
+    for (const g of galaxies) if (g.dust) drawGalaxy(g, tt, dt, now);
+    for (const g of galaxies) if (!g.dust) drawGalaxy(g, tt, dt, now);
+    drawBridge(tt);
+    drawYou(tt, dt, now);
+    drawEdgeMarks();
+  }
+  rafId = requestAnimationFrame(frame);
+
+  window.PITCH_STATE = () => {
+    const s = session && session.scale;
+    return {
+      playing: running, position: { x: Math.round(P.x), y: Math.round(P.y) },
+      scale: s && s.locked ? s.current.name : null, detectedFromMic: !!(s && s.detected),
+      galaxies: galaxies.filter(audible).map(g => ({ label: g.label, influence: +g.infl.toFixed(2), level: +g.level.toFixed(2) })),
+      field: { source: fieldSource(), magnetometerReadings: FIELD.magN, humFrames: FIELD.humN }
+    };
+  };
+
+  setStatus(statusText());
+})();
+</script>
+</body>
+</html>
