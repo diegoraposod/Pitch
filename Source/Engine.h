@@ -137,6 +137,8 @@ struct Fossil
     float meter = 0;
 };
 
+#include "Cloud.h"
+
 // ---------- the engine ----------
 class Engine
 {
@@ -151,14 +153,13 @@ public:
         for (auto& g : resFreq) g.setTime (0.3, sr);
         earthCents.setTime (30.0, sr); storm.setTime (20.0, sr); cloud.setTime (0.2, sr); inputDry.setTime (0.08, sr);
         reverbAmt.setTime (0.2, sr); outGain.setTime (0.05, sr);
-        inputDry.snap (1.0f); outGain.snap (1.0f); reverbAmt.snap (0.7f);
-        inputWet.setTime (0.15, sr); inputWet.snap (0.25f);
-        memL.assign ((size_t) (sr * 2.0) + 1, 0.0f); memR.assign (memL.size(), 0.0f); memW = 0; grainWait = 0;
-        for (auto& g : inGrains) g.on = false;
+        inputDry.snap (0.2f); outGain.snap (1.0f); reverbAmt.snap (0.7f);
+        inputCloud.setTime (0.1, sr); inputCloud.snap (1.0f); cloudSpace.setTime (0.3, sr); cloudSpace.snap (0.5f);
+        tuned.prepare (sr); tuned.setScale (scale, true);
         shimMin = maxBlock + 32; shimWin = (int) (0.11 * sr);
         shimL.assign ((size_t) (shimMin + shimWin + 64), 0.0f); shimR.assign (shimL.size(), 0.0f); shimW = 0; shimPh = 0;
         shimHp.set (400, 0.707f, sr); shimHpR = shimHp; shimLpL.set (5000, 0.707f, sr); shimLpR = shimLpL;
-        juce::Reverb::Parameters rp; rp.roomSize = 0.92f; rp.damping = 0.55f; rp.wetLevel = 1.0f; rp.dryLevel = 0.0f; rp.width = 1.0f;
+        juce::Reverb::Parameters rp; rp.roomSize = 0.97f; rp.damping = 0.4f; rp.wetLevel = 1.0f; rp.dryLevel = 0.0f; rp.width = 1.0f;
         reverb.setParameters (rp); reverb.setSampleRate (sr); reverb.reset();
         revHpL.set (140, 0.707f, sr); revHpR = revHpL; revLpL.set (6500, 0.707f, sr); revLpR = revLpL;
         bedLp.set (1800, 0.707f, sr);
@@ -174,13 +175,15 @@ public:
         for (size_t i = 0; i < 3; ++i) { binFreq[i].target = b[i]; if (snap) binFreq[i].snap (b[i]); }
         const float r[4] = { scale.voicing[0] * 2.0f, scale.voicing[2], scale.voicing[1] * 2.0f, scale.voicing[0] };
         for (size_t i = 0; i < 4; ++i) { resFreq[i].target = r[i]; if (snap) resFreq[i].snap (r[i]); }
+        tuned.setScale (scale, snap);
     }
 
     // control (called once per block, audio thread)
     void setStone (int id, const Spatial& s, float level) { stonePlace[(size_t) id].setTargets (s, level); stoneNear[(size_t) id] = s.near; }
     void setCloud (float c)          { cloud.target = c; }
-    void setInputDry (float v)       { inputDry.target = v; }
-    void setInputWet (float v)       { inputWet.target = v; }      // how much of the input goes through the cloud
+    void setInputDry (float v)       { inputDry.target = v; }      // the untouched input (kept low: PITCH always processes)
+    void setInputCloud (float v)     { inputCloud.target = v; }    // the input level feeding the tuned cloud
+    void setCloudSpace (float v)     { cloudSpace.target = v; }    // how much of the tuned cloud goes into the reverb
     void setEarthCents (float c)     { earthCents.target = c; }
     void setStorm (float v)          { storm.target = v; }
     void setReverb (float v)         { reverbAmt.target = v; }
@@ -215,11 +218,7 @@ private:
     std::array<Osc, 3> binL, binR; std::array<Glide, 3> binFreq; Osc binDrift, bedSway; Svf bedLp; Noise noise;
     // Granular cloud
     std::array<Svf, 4> res; std::array<Glide, 4> resFreq; std::array<double, 4> winPh {}; int resCounter = 0; Glide cloud;
-    std::array<Svf, 4> fres; int fresCounter = 0, fresActive = 0; float spectralEnv = 0;     // spectral cloud (input + fossils)
-    // input grain cloud: a 2 s memory of what PITCH receives, read back as soft scattered grains
-    struct InGrain { double pos = 0; int len = 0, age = 0; bool on = false; float pan = 0; };
-    std::array<InGrain, 8> inGrains; std::vector<float> memL, memR; int memW = 0, grainWait = 0; Noise grainRng;
-    Glide inputWet;
+    TunedCloud tuned; Glide inputCloud, cloudSpace;
     // SHIMMER: the reverb's tail is read back an octave up and fed into the reverb again, so every tail blooms in tune
     std::vector<float> shimL, shimR; int shimW = 0, shimMin = 0, shimWin = 0; double shimPh = 0; Svf shimHp, shimHpR, shimLpL, shimLpR;
     // buses
@@ -286,7 +285,7 @@ private:
                 l += bed * (0.5f + 0.5f * sway); r += bed * (0.5f - 0.5f * sway);
                 stonePlace[binaural].place (l, r, true, sr, dL, dR, sL, sR);
             }
-            // FOSSILS: placed in the space; each one also rings its own tuned resonance (see FOSSIL CLOUD below)
+            // FOSSILS: a quiet trace of each one sits in the space; the rest of it goes through the tuned cloud below
             float fossilFeed = 0;
             if (fossils != nullptr)
                 for (auto& fp : *fossils) fossilFeed += renderFossil (*fp, dL, dR, sL, sR);
@@ -306,64 +305,15 @@ private:
                 g *= 0.5f;
                 stonePlace[granular].place (g, g, false, sr, dL, dR, sL, sR);
             }
-            // INPUT GRAIN CLOUD: what you play or sing comes back scattered in time, mostly into the space
-            const float iw = inputWet.next();
+            // TUNED CLOUD: everything PITCH receives, plus every fossil, always goes through it
             {
-                const int memLen = (int) memL.size();
-                memL[(size_t) memW] = inl; memR[(size_t) memW] = inr;
-                if (--grainWait <= 0)
-                {
-                    for (auto& g : inGrains)
-                        if (! g.on)
-                        {
-                            const double delay = (0.12 + grainRng.uni() * 1.5) * sr;            // 0.12 .. 1.6 s back
-                            g.pos = memW - delay; if (g.pos < 0) g.pos += memLen;
-                            g.len = (int) ((0.05 + grainRng.uni() * 0.07) * sr);                 // 50 .. 120 ms
-                            g.age = 0; g.on = true; g.pan = grainRng.next() * 0.8f;
-                            break;
-                        }
-                    grainWait = (int) (0.02 * sr);
-                }
-                float gl = 0, gr = 0;
-                for (auto& g : inGrains)
-                {
-                    if (! g.on) continue;
-                    const int i0 = (int) g.pos;
-                    const float w = 0.5f - 0.5f * (float) std::cos (kTwoPi * g.age / g.len);
-                    gl += memL[(size_t) i0] * w * (1.0f - g.pan); gr += memR[(size_t) i0] * w * (1.0f + g.pan);
-                    if (++g.pos >= memLen) g.pos -= memLen;
-                    if (++g.age >= g.len) g.on = false;
-                }
-                if (++memW >= memLen) memW = 0;
-                gl *= 0.45f * iw; gr *= 0.45f * iw;
-                dL += gl * 0.5f; dR += gr * 0.5f; sL += gl * 1.2f; sR += gr * 1.2f;
-                // the raw input also breathes into the reverb
-                sL += inl * iw * 0.6f; sR += inr * iw * 0.6f;
+                float cl, cr;
+                tuned.tick (mic * inputCloud.next() + fossilFeed, cl, cr);
+                const float cs = cloudSpace.next();
+                dL += cl * 0.32f; dR += cr * 0.32f;                                 // the cloud, heard directly...
+                sL += cl * cs * 1.4f; sR += cr * cs * 1.4f;                         // ...and blooming into the reverb + shimmer
             }
-            const float spectralFeed = fossilFeed + mic * iw;
-            // SPECTRAL CLOUD: tuned resonators on the scale, rung by the input and the fossils, wherever you are on the map
-            if (spectralFeed != 0.0f || fresActive > 0)
-            {
-                if ((fresCounter++ & 31) == 0)
-                    for (size_t k = 0; k < 4; ++k) fres[k].set (resFreq[k].y, resQ[k], sr);
-                const float fx = spectralFeed * 1.6f;
-                float g = 0;
-                for (size_t k = 0; k < 4; ++k)
-                {
-                    const float w = 0.5f - 0.5f * (float) std::cos (kTwoPi * winPh[k]);
-                    g += fres[k].bp (fx) * (0.35f + 0.65f * w);
-                }
-                g *= 0.5f;
-                // gentle leveller: in-key notes make the resonators ring very hard, so ride them down to a calm level
-                const float a = std::abs (g);
-                spectralEnv = a > spectralEnv ? spectralEnv + (a - spectralEnv) * 0.01f : spectralEnv * 0.99995f;
-                if (spectralEnv > 0.12f) g *= 0.12f / spectralEnv;
-                fresActive = spectralFeed != 0.0f ? (int) sr : fresActive - 1;           // let the rings decay before going idle
-                dL += g * 0.55f; dR += g * 0.55f;                                          // a little in the dry...
-                const float pan = 0.25f * (float) std::sin (kTwoPi * winPh[1]);           // ...most of it drifting into the reverb
-                sL += g * (1.0f - pan); sR += g * (1.0f + pan);
-            }
-            // the incoming signal, receding as you move into the cloud
+            // a trace of the untouched input underneath
             const float id = inputDry.next();
             dL += inl * id; dR += inr * id;
 
@@ -452,8 +402,8 @@ private:
         }
         l *= 0.66f; r *= 0.66f;
         f.meter = std::max (std::abs (l), f.meter * 0.9995f);
-        f.place.place (l, r, true, sr, dL, dR, sL, sR);
-        return 0.5f * (l + r) * f.place.gain.y;                       // closer / louder fossils ring the cloud harder
+        f.place.place (l * 0.3f, r * 0.3f, true, sr, dL, dR, sL, sR);
+        return 0.5f * (l + r) * f.place.gain.y;                       // closer / louder fossils feed the cloud harder
     }
 };
 } // namespace pitch

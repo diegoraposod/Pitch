@@ -85,6 +85,7 @@ void PitchEditor::mouseDown (const juce::MouseEvent& e)
     if (recButtonBounds().expanded (4).contains (p)) { proc.isRecording() ? proc.stopRecording() : proc.startRecording(); drag = Drag::none; return; }
     if (keyBounds().contains (p) || modeBounds().contains (p))
     {
+        proc.stopAutoKey();                                                    // a key chosen by hand stays
         auto* prm = proc.params.getParameter (keyBounds().contains (p) ? "key" : "mode");
         const int count = keyBounds().contains (p) ? 12 : 7, step = e.mods.isRightButtonDown() ? count - 1 : 1;
         const int now = juce::roundToInt (prm->convertFrom0to1 (prm->getValue()));
@@ -152,6 +153,11 @@ void PitchEditor::mouseUp (const juce::MouseEvent& e)
     {
         glide = toWorld (e.position);                                    // a tap on the water: drift there
         endCoreGesture(); beginCoreGesture();
+    }
+    else if (drag == Drag::core && ! moved)                             // a tap on the core: bounce 6 s of what is playing into a fossil
+    {
+        endCoreGesture();
+        if (proc.isRecording()) proc.stopRecording(); else proc.startRecording (true, 6.0);
     }
     else if (drag == Drag::core || drag == Drag::space) endCoreGesture();
     dragFossil.reset();
@@ -268,7 +274,7 @@ void PitchEditor::drawCore (juce::Graphics& g)
     }
     if (proc.isRecording())
     {
-        const float prog = (float) (proc.recordedSeconds() / proc.maxRecordSeconds());
+        const float prog = (float) (proc.recordedSeconds() / std::max (0.5, proc.recordLimitSeconds()));
         juce::Path arc; arc.addCentredArc (c.x, c.y, 60, 60, 0, 0, juce::MathConstants<float>::twoPi * prog, true);
         g.setColour (kRec.withAlpha (0.8f)); g.strokePath (arc, juce::PathStrokeType (1.2f));
     }
@@ -369,6 +375,11 @@ void PitchEditor::paint (juce::Graphics& g)
     g.setFont (font (9.0f)); g.setColour (kInk.withAlpha (0.6f));
     g.drawText (kKeys[sc.pc], keyBounds(), juce::Justification::left);
     g.drawText (kModeNames[sc.mode], modeBounds(), juce::Justification::left);
+    if (proc.isListeningForKey())
+    {
+        g.setColour (kInk.withAlpha (0.35f + 0.25f * (float) std::sin (juce::Time::getMillisecondCounterHiRes() * 0.004)));
+        g.drawText ("listening for the key...", 24, 72, 200, 12, juce::Justification::left);
+    }
     const float kp = proc.kpNow();
     if (kp >= 0) { g.setColour (kMute); g.drawText ("earth kp " + juce::String (kp, 1), 24, 58, 160, 14, juce::Justification::left); }
 

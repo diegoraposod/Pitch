@@ -25,6 +25,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout PitchAudioProcessor::createL
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "output", 1 }, "Output", NormalisableRange<float> (-24.0f, 6.0f), 0.0f,
                                                   AudioParameterFloatAttributes().withLabel ("dB")));
     l.add (std::make_unique<AudioParameterBool> (ParameterID { "earthLive", 1 }, "Earth Live", true));
+    l.add (std::make_unique<AudioParameterBool> (ParameterID { "autoKey", 1 }, "Auto Key", true));   // listen and tune to what comes in
     return l;
 }
 
@@ -39,6 +40,7 @@ PitchAudioProcessor::PitchAudioProcessor()
     fossilLvl = params.getRawParameterValue ("fossils"); inputLvl = params.getRawParameterValue ("input");
     space = params.getRawParameterValue ("space"); output = params.getRawParameterValue ("output");
     earthLive = params.getRawParameterValue ("earthLive");
+    autoKey = params.getRawParameterValue ("autoKey");
     formats.registerBasicFormats();
     startTimerHz (10);
 }
@@ -83,18 +85,20 @@ void PitchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     if (inCh == 1 && buffer.getNumChannels() > 1) buffer.copyFrom (1, 0, buffer, 0, 0, n);   // mono input -> both sides
     if (inCh == 0) buffer.clear();                                                            // no input: drones only
 
-    // record the signal PITCH receives (before it is processed)
-    if (recording.load())
+    // copy the input for the key detector (mono, lock-free ring)
+    if (autoKey->load() > 0.5f && inCh > 0)
     {
-        int pos = recPos.load();
-        const int room = recBuffer.getNumSamples() - pos, take = std::min (room, n);
-        if (take > 0)
-        {
-            for (int ch = 0; ch < 2; ++ch) recBuffer.copyFrom (ch, pos, buffer, std::min (ch, buffer.getNumChannels() - 1), 0, take);
-            recPos.store (pos + take);
-        }
-        if (take < n) recording.store (false);                                               // buffer full: stop
+        const float* a = buffer.getReadPointer (0);
+        const float* b = buffer.getReadPointer (buffer.getNumChannels() > 1 ? 1 : 0);
+        int w = keyRingW.load (std::memory_order_relaxed);
+        const int len = (int) keyRing.size();
+        for (int i = 0; i < n; ++i) { keyRing[(size_t) w] = 0.5f * (a[i] + b[i]); if (++w >= len) w = 0; }
+        keyRingW.store (w, std::memory_order_release);
+        keyFresh.fetch_add (n);
     }
+
+    // record the signal PITCH receives (before it is processed)
+    if (recording.load() && ! recOutput.load()) captureInto (buffer, n);
 
     // scale
     const int k = (int) key->load(), m = (int) mode->load();
@@ -127,8 +131,9 @@ void PitchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     }
 
     engine.setCloud (cloud);                                         // near the stones the input rings their resonators
-    engine.setInputDry (inputLvl->load() * (1.0f - 0.7f * cloud));   // ...and the dry input recedes (Earth -> Cloud)
-    engine.setInputWet (inputLvl->load() * (0.3f + 0.7f * cloud));    // always a little space; near the stones, mostly cloud
+    engine.setInputDry (inputLvl->load() * 0.18f * (1.0f - cloud));  // only a trace of the raw input: PITCH always processes it
+    engine.setInputCloud (inputLvl->load());                          // everything that comes in goes through the tuned cloud
+    engine.setCloudSpace (0.4f + 0.4f * cloud);                      // back home at Earth the cloud is drier; near the stones it blooms
     engine.setEarthCents (earthDriftCents());
     const float kp = kpFetcher.kp.load();
     engine.setStorm (earthLive->load() > 0.5f && kp >= 0.0f ? kp / 9.0f : 0.0f);
@@ -138,6 +143,21 @@ void PitchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     float* L = buffer.getWritePointer (0);
     float* R = buffer.getWritePointer (buffer.getNumChannels() > 1 ? 1 : 0);
     engine.process (L, R, L, R, n, fossilList);
+
+    // a tap on the core bounces what PITCH is playing into a new fossil
+    if (recording.load() && recOutput.load()) captureInto (buffer, n);
+}
+
+void PitchAudioProcessor::captureInto (const juce::AudioBuffer<float>& buffer, int n)
+{
+    const int pos = recPos.load();
+    const int room = std::min (recBuffer.getNumSamples(), recLimit.load()) - pos, take = std::max (0, std::min (room, n));
+    if (take > 0)
+    {
+        for (int ch = 0; ch < 2; ++ch) recBuffer.copyFrom (ch, pos, buffer, std::min (ch, buffer.getNumChannels() - 1), 0, take);
+        recPos.store (pos + take);
+    }
+    if (take < n) recording.store (false);                                                   // limit reached: stop
 }
 
 // ---------- fossils ----------
@@ -195,9 +215,11 @@ std::vector<std::shared_ptr<Fossil>> PitchAudioProcessor::fossilSnapshot()
 }
 
 // ---------- recording ----------
-void PitchAudioProcessor::startRecording()
+void PitchAudioProcessor::startRecording (bool bounceOutput, double seconds)
 {
     if (recBuffer.getNumSamples() < 2) return;
+    recOutput.store (bounceOutput);
+    recLimit.store ((int) (std::min (seconds, maxRecordSeconds()) * sampleRateNow));
     recPos.store (0); recording.store (true); recPending = true;
 }
 
@@ -209,6 +231,37 @@ void PitchAudioProcessor::timerCallback()
     const int k = (int) key->load(), m = (int) mode->load();
     if (k != shownScale.pc || m != shownScale.mode) shownScale = buildScale (k, m);
     if (recPending && ! recording.load()) { recPending = false; finishRecording(); }
+
+    // auto key: when it is switched back on, listen again from scratch
+    const bool ak = autoKey->load() > 0.5f;
+    if (ak && ! lastAutoKey) { params.state.setProperty ("keyLocked", false, nullptr); keyDetector.reset(); }
+    lastAutoKey = ak;
+    if (! isListeningForKey()) return;
+
+    // every ~0.2 s of new input, analyse the latest window
+    const int hop = (int) (0.2 * sampleRateNow);
+    if (keyFresh.load() < hop) return;
+    keyFresh.store (0);
+    const int len = (int) keyRing.size(), w = keyRingW.load (std::memory_order_acquire);
+    for (int i = 0; i < KeyDetector::size; ++i) keyWindow[(size_t) i] = keyRing[(size_t) ((w - KeyDetector::size + i + len) % len)];
+    int pc = 0, md = 3;
+    if (keyDetector.analyse (keyWindow.data(), sampleRateNow, 0.2, pc, md))
+    {
+        const char* ids[2] = { "key", "mode" }; const int vals[2] = { pc, md };
+        for (int i = 0; i < 2; ++i)
+        {
+            auto* p = params.getParameter (ids[i]);
+            p->beginChangeGesture(); p->setValueNotifyingHost (p->convertTo0to1 ((float) vals[i])); p->endChangeGesture();
+        }
+        params.state.setProperty ("keyLocked", true, nullptr);                 // decided: keep this key (saved with the project)
+    }
+}
+
+void PitchAudioProcessor::stopAutoKey()
+{
+    auto* p = params.getParameter ("autoKey");
+    p->beginChangeGesture(); p->setValueNotifyingHost (0.0f); p->endChangeGesture();
+    lastAutoKey = false;
 }
 
 void PitchAudioProcessor::finishRecording()

@@ -63,6 +63,7 @@ target_link_libraries(PITCH
     juce::juce_audio_processors
     juce::juce_audio_formats
     juce::juce_gui_basics
+    juce::juce_dsp
   PUBLIC
     juce::juce_recommended_config_flags
     juce::juce_recommended_lto_flags

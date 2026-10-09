@@ -2,6 +2,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "Engine.h"
+#include "KeyDetect.h"
 
 // Polls NOAA's planetary K-index (public JSON, updated every minute) in the background.
 class KpFetcher : private juce::Thread
@@ -79,17 +80,20 @@ public:
     std::vector<std::shared_ptr<pitch::Fossil>> fossilSnapshot();
     static bool isAudioFile (const juce::String& path);
 
-    void startRecording();                                                  // records the signal PITCH receives
+    void startRecording (bool bounceOutput = false, double seconds = 30.0); // records what PITCH receives, or (tap on the core) bounces what it plays
     void stopRecording();
     bool isRecording() const { return recording.load(); }
     double recordedSeconds() const { return recPos.load() / std::max (1.0, sampleRateNow); }
     double maxRecordSeconds() const { return 30.0; }
+    double recordLimitSeconds() const { return recLimit.load() / std::max (1.0, sampleRateNow); }
     juce::String lastSavedName;
 
     float kpNow() const { return kpFetcher.kp.load(); }
     float inputMeter() const { return engine.inputMeter.load(); }
     float outputMeter() const { return engine.outputMeter.load(); }
     const pitch::Scale& currentScale() const { return shownScale; }
+    bool isListeningForKey() const { return autoKey->load() > 0.5f && ! (bool) params.state.getProperty ("keyLocked", false); }
+    void stopAutoKey();                                                      // the user picked a key by hand
 
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
@@ -107,6 +111,15 @@ private:
     std::atomic<float>* lvl[pitch::numStones] {};
     std::atomic<float>* fossilLvl = nullptr; std::atomic<float>* inputLvl = nullptr;
     std::atomic<float>* space = nullptr; std::atomic<float>* output = nullptr; std::atomic<float>* earthLive = nullptr;
+    std::atomic<float>* autoKey = nullptr;
+
+    // key detection: the audio thread copies the input into this ring; the timer analyses it
+    std::vector<float> keyRing = std::vector<float> (1 << 15, 0.0f);
+    std::atomic<int> keyRingW { 0 };
+    std::atomic<int> keyFresh { 0 };
+    pitch::KeyDetector keyDetector;
+    std::vector<float> keyWindow = std::vector<float> ((size_t) pitch::KeyDetector::size, 0.0f);
+    bool lastAutoKey = true;
 
     std::vector<std::shared_ptr<pitch::Fossil>> fossils;    // read on the audio thread under a try-lock
     juce::SpinLock fossilLock;
@@ -114,7 +127,9 @@ private:
 
     juce::AudioBuffer<float> recBuffer;
     std::atomic<bool> recording { false };
-    std::atomic<int> recPos { 0 };
+    std::atomic<int> recPos { 0 }, recLimit { 0 };
+    std::atomic<bool> recOutput { false };
+    void captureInto (const juce::AudioBuffer<float>& buffer, int n);
     bool recPending = false;
 
     juce::AudioFormatManager formats;
