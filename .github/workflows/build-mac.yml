@@ -1,0 +1,52 @@
+name: Build PITCH for Mac (AU + VST3)
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  mac:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (universal: Apple Silicon + Intel)
+        run: cmake -B build -G Xcode -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Sign for local use (ad-hoc) and package
+        run: |
+          mkdir -p out
+          cp -R build/PITCH_artefacts/Release/AU/PITCH.component out/
+          cp -R build/PITCH_artefacts/Release/VST3/PITCH.vst3 out/
+          codesign --force --deep --sign - out/PITCH.component
+          codesign --force --deep --sign - out/PITCH.vst3
+          cp install.command out/
+          chmod +x out/install.command
+          cd out && zip -r -y ../PITCH-mac.zip .
+
+      - name: Validate the Audio Unit
+        run: |
+          mkdir -p ~/Library/Audio/Plug-Ins/Components
+          cp -R out/PITCH.component ~/Library/Audio/Plug-Ins/Components/
+          killall -9 AudioComponentRegistrar || true
+          auval -v aufx Ptch Dieg
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PITCH-mac
+          path: PITCH-mac.zip
+
+      # When a version tag is pushed (v1.0, v1.1...), publish a Release with the zip attached.
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: PITCH ${{ github.ref_name }}
+          body: Generador de drones y binaurales que afina el sonido de tu entorno. Descomprime y haz doble clic en install.command (Mac, AU + VST3).
+          files: PITCH-mac.zip
