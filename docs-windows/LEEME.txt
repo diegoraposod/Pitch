@@ -1,0 +1,13 @@
+PITCH · por Diego Raposo
+Generador de drones y binaurales que afina el sonido de tu entorno.
+VST3 · Windows 10 / 11 (64 bits)
+
+INSTALAR
+1. Copia la carpeta PITCH.vst3 a:  C:\Program Files\Common Files\VST3
+   (Windows pedirá permiso de administrador: haz clic en Continuar.)
+2. En Ableton Live: Options > Preferences > Plug-Ins > activa "Use VST3 Plug-In System Folders" y pulsa Rescan.
+3. Busca PITCH en Plug-Ins > Diego Raposo y ponlo en una pista de audio.
+
+Si Windows SmartScreen muestra un aviso: "Más información" > "Ejecutar de todos modos".
+
+diegoraposo.info

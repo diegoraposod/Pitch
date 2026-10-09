@@ -127,7 +127,8 @@ void PitchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     }
 
     engine.setCloud (cloud);                                         // near the stones the input rings their resonators
-    engine.setInputDry (inputLvl->load() * (1.0f - 0.55f * cloud));  // ...and the dry input recedes (Earth -> Cloud)
+    engine.setInputDry (inputLvl->load() * (1.0f - 0.7f * cloud));   // ...and the dry input recedes (Earth -> Cloud)
+    engine.setInputWet (inputLvl->load() * (0.3f + 0.7f * cloud));    // always a little space; near the stones, mostly cloud
     engine.setEarthCents (earthDriftCents());
     const float kp = kpFetcher.kp.load();
     engine.setStorm (earthLive->load() > 0.5f && kp >= 0.0f ? kp / 9.0f : 0.0f);

@@ -1,0 +1,14 @@
+PITCH · por Diego Raposo
+Generador de drones y binaurales que afina el sonido de tu entorno.
+Audio Unit + VST3 · macOS 11 o más reciente · Apple Silicon e Intel
+
+INSTALAR
+1. Doble clic en install.command.
+   Si macOS dice que no lo puede verificar: haz clic en Listo, abre
+   Configuración del Sistema > Privacidad y seguridad, baja hasta el final
+   y haz clic en "Abrir de todos modos" junto a install.command.
+   Luego vuelve a hacer doble clic y elige Abrir.
+2. En Ableton Live: Configuración > Plug-Ins > activa Audio Units / VST3 y pulsa Rescan.
+3. Busca PITCH en Plug-Ins y ponlo en una pista de audio.
+
+diegoraposo.info

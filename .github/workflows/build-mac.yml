@@ -1,7 +1,10 @@
-name: Build PITCH for Mac (AU + VST3)
+name: Build PITCH (Mac AU + VST3, Windows VST3)
 
 on:
   push:
+    branches: [main]
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -27,6 +30,7 @@ jobs:
           codesign --force --deep --sign - out/PITCH.component
           codesign --force --deep --sign - out/PITCH.vst3
           cp install.command out/
+          cp docs/* out/ 2>/dev/null || true
           chmod +x out/install.command
           cd out && zip -r -y ../PITCH-mac.zip .
 
@@ -44,10 +48,42 @@ jobs:
 
       # When a version tag is pushed (v1.0, v1.1...), publish a Release with the zip attached.
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          name: PITCH ${{ github.ref_name }}
+          tag_name: ${{ github.event.release.tag_name || github.ref_name }}
+          name: PITCH ${{ github.event.release.tag_name || github.ref_name }}
           body: >-
             Generador de drones y binaurales que afina el sonido de tu entorno. Descomprime y haz doble clic en install.command (Mac, AU + VST3).
           files: PITCH-mac.zip
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure (64-bit)
+        run: cmake -B build -G "Visual Studio 17 2022" -A x64
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item -Recurse build/PITCH_artefacts/Release/VST3/PITCH.vst3 out/
+          Copy-Item docs-windows/* out/
+          Compress-Archive -Path out/* -DestinationPath PITCH-windows.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PITCH-windows
+          path: PITCH-windows.zip
+
+      - name: Publish release
+        if: github.event_name == 'release' || startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.release.tag_name || github.ref_name }}
+          files: PITCH-windows.zip

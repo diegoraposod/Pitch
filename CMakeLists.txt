@@ -25,7 +25,7 @@ else()
 endif()
 
 juce_add_plugin(PITCH
-  COMPANY_NAME "Diego"
+  COMPANY_NAME "Diego Raposo"
   BUNDLE_ID "com.diego.pitch"
   PLUGIN_MANUFACTURER_CODE Dieg
   PLUGIN_CODE Ptch
