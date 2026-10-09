@@ -131,10 +131,10 @@ void PitchAudioProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::
     }
 
     engine.setCloud (cloud);                                         // near the stones the input rings their resonators
-    engine.setInputDry (inputLvl->load() * 0.18f * (1.0f - cloud));  // only a trace of the raw input: PITCH always processes it
+    engine.setInputDry (0.0f);                                         // only a trace of the raw input: PITCH always processes it
     engine.setInputCloud (inputLvl->load());                          // everything that comes in goes through the tuned cloud
     engine.setCloudSpace (0.4f + 0.4f * cloud);                      // back home at Earth the cloud is drier; near the stones it blooms
-    engine.setEarthCents (earthDriftCents());
+    engine.setEarthCents (0.15f * earthDriftCents());                 // a few cents of breathing, never out of tune
     const float kp = kpFetcher.kp.load();
     engine.setStorm (earthLive->load() > 0.5f && kp >= 0.0f ? kp / 9.0f : 0.0f);
     engine.setReverb (space->load());

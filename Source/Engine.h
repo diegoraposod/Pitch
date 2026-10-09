@@ -151,7 +151,7 @@ public:
         for (auto& g : sineFreq) g.setTime (0.3, sr);
         for (auto& g : binFreq) g.setTime (0.3, sr);
         for (auto& g : resFreq) g.setTime (0.3, sr);
-        earthCents.setTime (30.0, sr); storm.setTime (20.0, sr); cloud.setTime (0.2, sr); inputDry.setTime (0.08, sr);
+        earthCents.setTime (30.0, sr); earthTune.setTime (2.0, sr); earthTune.snap (1.0f); storm.setTime (20.0, sr); cloud.setTime (0.2, sr); inputDry.setTime (0.08, sr);
         reverbAmt.setTime (0.2, sr); outGain.setTime (0.05, sr);
         inputDry.snap (0.2f); outGain.snap (1.0f); reverbAmt.snap (0.7f);
         inputCloud.setTime (0.1, sr); inputCloud.snap (1.0f); cloudSpace.setTime (0.3, sr); cloudSpace.snap (0.5f);
@@ -176,6 +176,15 @@ public:
         const float r[4] = { scale.voicing[0] * 2.0f, scale.voicing[2], scale.voicing[1] * 2.0f, scale.voicing[0] };
         for (size_t i = 0; i < 4; ++i) { resFreq[i].target = r[i]; if (snap) resFreq[i].snap (r[i]); }
         tuned.setScale (scale, snap);
+        // the Earth drone keeps its Schumann character but lands on the closest note of the key, so nothing clashes
+        double best = 125.28, bestDist = 1.0e9;
+        for (int d = 0; d < 7; ++d)
+            for (int o = -2; o <= 3; ++o)
+            {
+                const double f = scale.notes[(size_t) d] * std::pow (2.0, o), dist = std::abs (std::log2 (f / 125.28));
+                if (dist < bestDist) { bestDist = dist; best = f; }
+            }
+        earthTune.target = (float) (best / 125.28); if (snap) earthTune.snap (earthTune.target);
     }
 
     // control (called once per block, audio thread)
@@ -211,13 +220,13 @@ private:
     std::array<Placement, numStones> stonePlace;
 
     // Earth
-    std::array<Osc, 6> earthOsc; Osc earthPulse; Glide earthCents, storm;
+    std::array<Osc, 6> earthOsc; Osc earthPulse; Glide earthCents, storm, earthTune;
     // Sine bank
     std::array<Osc, 6> sineOsc, sineTrem, sineDrift; std::array<Glide, 6> sineFreq;
     // Binaural
     std::array<Osc, 3> binL, binR; std::array<Glide, 3> binFreq; Osc binDrift, bedSway; Svf bedLp; Noise noise;
     // Granular cloud
-    std::array<Svf, 4> res; std::array<Glide, 4> resFreq; std::array<double, 4> winPh {}; int resCounter = 0; Glide cloud;
+    std::array<Svf, 4> res; std::array<Glide, 4> resFreq; std::array<double, 4> winPh {}; int resCounter = 0; Glide cloud; float micEnv = 0;
     TunedCloud tuned; Glide inputCloud, cloudSpace;
     // SHIMMER: the reverb's tail is read back an octave up and fed into the reverb again, so every tail blooms in tune
     std::vector<float> shimL, shimR; int shimW = 0, shimMin = 0, shimWin = 0; double shimPh = 0; Svf shimHp, shimHpR, shimLpL, shimLpR;
@@ -249,7 +258,7 @@ private:
 
             // EARTH: Schumann x 16, sub-octave and fifth; storms open its upper partials and deepen the 7.83 Hz pulse
             {
-                const double ratio = std::pow (2.0, earthCents.next() / 1200.0);
+                const double ratio = earthTune.next() * std::pow (2.0, earthCents.next() / 1200.0);   // Schumann x 16, pulled onto the nearest note of the key
                 const float st = storm.next();
                 float e = 0;
                 for (size_t k = 0; k < 6; ++k)
@@ -285,14 +294,15 @@ private:
                 l += bed * (0.5f + 0.5f * sway); r += bed * (0.5f - 0.5f * sway);
                 stonePlace[binaural].place (l, r, true, sr, dL, dR, sL, sR);
             }
-            // FOSSILS: a quiet trace of each one sits in the space; the rest of it goes through the tuned cloud below
+            // FOSSILS: they go entirely through the tuned cloud below (nothing clean)
             float fossilFeed = 0;
             if (fossils != nullptr)
                 for (auto& fp : *fossils) fossilFeed += renderFossil (*fp, dL, dR, sL, sR);
 
             // GRANULAR CLOUD: resonators on the scale, excited by soft noise and by the incoming signal
             {
-                const float ex = noise.next() * 0.18f + mic * cloud.next() * 1.6f;
+                micEnv += (std::abs (mic) - micEnv) * 0.003f;                       // your sound's energy (not its pitch) swells the resonators
+                const float ex = noise.next() * (0.18f + micEnv * cloud.next() * 5.0f);
                 if ((resCounter++ & 31) == 0)
                     for (size_t k = 0; k < 4; ++k) res[k].set (resFreq[k].next(), resQ[k], sr);
                 float g = 0;
@@ -311,7 +321,7 @@ private:
                 tuned.tick (mic * inputCloud.next() + fossilFeed, cl, cr);
                 const float cs = cloudSpace.next();
                 dL += cl * 0.32f; dR += cr * 0.32f;                                 // the cloud, heard directly...
-                sL += cl * cs * 1.4f; sR += cr * cs * 1.4f;                         // ...and blooming into the reverb + shimmer
+                sL += cl * cs * 0.8f; sR += cr * cs * 0.8f;                         // ...and blooming into the reverb + shimmer
             }
             // a trace of the untouched input underneath
             const float id = inputDry.next();
@@ -402,7 +412,7 @@ private:
         }
         l *= 0.66f; r *= 0.66f;
         f.meter = std::max (std::abs (l), f.meter * 0.9995f);
-        f.place.place (l * 0.3f, r * 0.3f, true, sr, dL, dR, sL, sR);
+        f.place.place (0.0f, 0.0f, true, sr, dL, dR, sL, sR);          // keeps its distance/level glides moving; nothing clean is heard
         return 0.5f * (l + r) * f.place.gain.y;                       // closer / louder fossils feed the cloud harder
     }
 };
